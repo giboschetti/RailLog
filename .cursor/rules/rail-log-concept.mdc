@@ -1,0 +1,180 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+# Your rule content
+.
+
+🎯 Projekt: Rail Log – Webbasierte App für Logistikmanagement im Bahnbau
+🌐 Sprache
+Deutsch (Frontend und Benutzerinteraktion)
+
+🔧 Technologie-Empfehlung (Tech-Stack)
+Basierend auf deinem bestehenden Skillset und dem Projektbedarf empfehle ich diesen modernen Tech-Stack:
+
+Bereich	Technologie
+Frontend	Next.js (React), TailwindCSS
+Backend & Auth	Supabase (für Auth, DB, File Storage, Realtime)
+Deployment	Vercel
+State Management	React Context oder Zustand (für komplexe UI-Zustände)
+Canvas/Visualisierung	Konva.js oder SVG mit D3.js für Track/Wagen-Zeitleiste
+Sonstiges	Python (für evtl. serverseitige Analysen/Tools), Github für Versionierung
+📘 Beschreibung der Anwendung
+Rail Log ist eine Webanwendung zur Verwaltung von Bauzuglogistik in Infrastrukturprojekten. Sie visualisiert den Standort und die Bewegung von Waggons in "Logistikknoten" auf einer Zeitachse – als interaktive Darstellung mit Planungs- und Kontrollfunktionen.
+
+🧩 Hauptkomponenten
+1. Canvas-Zeitleiste
+Darstellung der Gleise als horizontale Balken
+
+Darstellung der Waggons als Rechtecke innerhalb der Gleisbalken
+
+Oben: Zeitachse (Slider). Beim Verschieben:
+
+Vergangenes = effektive Zustände
+
+Zukünftiges = geplante Zustände
+
+Farbe des Waggons = Zugehörigkeit zu einem Projekt
+
+Klick auf Waggon öffnet Detailfenster
+
+2. Logistische Objekte & Struktur
+🧱 Logistikknoten
+Jede Baustelle oder Station ist ein Logistikknoten
+
+Ein Knoten enthält mehrere Gleise
+
+Gleis-Attribute:
+
+Name
+
+Nutzlänge in Metern
+
+🚛 Waggons
+Eigenschaften:
+
+ID (optional)
+
+Typ (aus Masterliste, inkl. „Custom“)
+
+Länge (abhängig vom Typ)
+
+Inhalt (optional)
+
+Projekt-Zugehörigkeit
+
+Ankunfts- und Abfahrtsdatum (aus Trips berechnet)
+
+🚚 Trips (Bewegungen)
+Typen:
+
+Lieferung
+
+Abfahrt
+
+Interne Bewegung
+
+Jede Bewegung ist entweder:
+
+Geplant (zukünftige Buchung)
+
+Effektiv (vergangene oder bestätigte Bewegung)
+
+Drag-and-Drop-Interface für interne Trips vorgeschlagen
+
+Vor jeder Buchung: Kapazitätsprüfung auf dem Zielgleis (Summe Waggonlängen ≤ Nutzlänge)
+
+3. Restriktionen
+Zwei Arten:
+
+Kein Eingang möglich (z. B. Streckensperre)
+
+Kein Ausgang möglich
+
+Eigenschaften:
+
+Zeitfenster (von/bis)
+
+Betroffene Gleise oder Knoten (Mehrfachauswahl)
+
+Wiederholung (täglich, wöchentlich etc.)
+
+Kommentar
+
+Validierung:
+
+Neue Trip-Buchungen prüfen auf bestehende Restriktionen
+
+Neue Restriktionen prüfen auf bestehende Trips
+
+Bei Konflikt: Benutzerwarnung & Markierung des Trips als „problematisch“
+
+4. Informationsfenster (unten im UI)
+Planung & Restriktionen (für ausgewähltes Datum)
+
+Trip-Typ, Zeit, Ort, Waggontypen
+
+Restriktionen in Rot mit Grundtext
+
+Waggon-Details
+
+Bei Klick auf Waggon: Anzeigen und (teilweise) bearbeiten
+
+5. Exportfunktion
+CSV/TXT-Export aller geplanten/effectiven Trips & Restriktionen
+
+6. Benutzer & Authentifizierung
+Login mit Supabase Auth
+
+Zwei Rollen:
+
+Logistikmanager (Admin):
+
+Erstellen/Bearbeiten aller Objekte & Restriktionen
+
+Zugriff auf Admin-Konsole
+
+Viewer:
+
+Nur lesender Zugriff auf Zeitachse, Waggonpositionen und Exporte
+
+💡 Zusatzfeatures (optional für spätere Iterationen)
+Drag & Drop UX-Optimierungen
+
+Realtime-Updates mit Supabase Realtime
+
+Mobile Optimierung
+
+Audit-Log (z. B. Änderungshistorie bei Trips)
+
+🗃️ Datenmodell (Beispiel-Schema für Supabase)
+projects
+
+id, name, color
+
+nodes
+
+id, name, type (station/site), project_id
+
+tracks
+
+id, node_id, name, length
+
+wagons
+
+id, type, length, content, project_id
+
+trips
+
+id, type (delivery/departure/internal), datetime, wagons[], source_track_id, dest_track_id, transport_plan_number
+
+restrictions
+
+id, type (in/out), from_datetime, to_datetime, node_ids[], track_ids[], recurrence, comment
+
+users
+
+id, email, role (admin/viewer)
+
