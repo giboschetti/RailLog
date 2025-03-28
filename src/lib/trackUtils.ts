@@ -716,10 +716,6 @@ export async function expandRestriction(
       hasSupabase: !!supabaseClient
     });
     
-    // TEMPORARY WORKAROUND: Check if auth is enabled and if we have POLICY errors
-    // On policy errors, we'll note this in the logs - the admin will need to update policies
-    let policyErrorDetected = false;
-    
     // Validate the supabase client is working
     try {
       const healthCheck = await supabaseClient.from('daily_restrictions').select('count', { count: 'exact', head: true });
@@ -728,58 +724,108 @@ export async function expandRestriction(
       console.error('Supabase health check failed:', err);
     }
     
-    const start = new Date(startDateTime);
-    const end = new Date(endDateTime);
+    // Parse dates with explicit UTC handling to avoid timezone issues
+    const startDate = new Date(startDateTime);
+    const endDate = new Date(endDateTime);
     
-    // Get start and end time components
-    const timeFrom = start.toTimeString().substring(0, 8); // HH:MM:SS
-    const timeTo = end.toTimeString().substring(0, 8);  // HH:MM:SS
+    console.log(`Original date inputs:
+    - startDateTime: ${startDateTime}
+    - endDateTime: ${endDateTime}
+    - parsed startDate: ${startDate.toISOString()}
+    - parsed endDate: ${endDate.toISOString()}`);
+    
+    // Get original start and end time components
+    const originalTimeFrom = startDate.toTimeString().substring(0, 8); // HH:MM:SS
+    const originalTimeTo = endDate.toTimeString().substring(0, 8);
     
     // For 'once' pattern, create daily records for each day in the range
     if (repetitionPattern === 'once') {
       const dailyRecords = [];
       
-      // Set start date to midnight
-      const currentDate = new Date(start);
-      currentDate.setHours(0, 0, 0, 0);
+      // Create dates without time component for date comparison
+      // Use UTC methods to avoid timezone issues
+      const startDateOnly = new Date(Date.UTC(
+        startDate.getUTCFullYear(),
+        startDate.getUTCMonth(),
+        startDate.getUTCDate()
+      ));
       
-      // Set end date to midnight of the next day (to include the end date)
-      const lastDate = new Date(end);
-      lastDate.setDate(lastDate.getDate() + 1);
-      lastDate.setHours(0, 0, 0, 0);
+      const endDateOnly = new Date(Date.UTC(
+        endDate.getUTCFullYear(),
+        endDate.getUTCMonth(),
+        endDate.getUTCDate()
+      ));
       
-      // Loop through each day in the range
-      while (currentDate < lastDate) {
-        const dateString = currentDate.toISOString().split('T')[0]; // YYYY-MM-DD
+      console.log(`Date comparison values:
+      - startDateOnly: ${startDateOnly.toISOString()}
+      - endDateOnly: ${endDateOnly.toISOString()}`);
+      
+      // Calculate days between dates (inclusive)
+      // Add 1 to include the end date (end - start) / day_in_ms + 1
+      const dayDiff = Math.floor((endDateOnly.getTime() - startDateOnly.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+      
+      console.log(`Calculated day difference (inclusive): ${dayDiff} days`);
+      
+      // Create a date for each day in the range (inclusive of both start and end date)
+      for (let i = 0; i < dayDiff; i++) {
+        // Clone the start date and add days
+        const currentDate = new Date(Date.UTC(
+          startDateOnly.getUTCFullYear(),
+          startDateOnly.getUTCMonth(),
+          startDateOnly.getUTCDate() + i
+        ));
+        
+        // Format as YYYY-MM-DD for database
+        const year = currentDate.getUTCFullYear();
+        const month = String(currentDate.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(currentDate.getUTCDate()).padStart(2, '0');
+        const currentDateString = `${year}-${month}-${day}`;
+        
+        // Determine the correct time_from and time_to for this specific day
+        let timeFrom = '00:00:00';
+        let timeTo = '23:59:59';
+        
+        // If this is the first day (start date), use the original start time
+        if (i === 0) {
+          timeFrom = originalTimeFrom;
+        }
+        
+        // If this is the last day (end date), use the original end time
+        if (i === dayDiff - 1) {
+          timeTo = originalTimeTo;
+        }
+        
+        console.log(`Creating daily record ${i+1} of ${dayDiff}:
+        - Date: ${currentDateString}
+        - Time range: ${timeFrom} - ${timeTo}
+        - Is first day: ${i === 0}
+        - Is last day: ${i === dayDiff - 1}`);
         
         dailyRecords.push({
           original_restriction_id: restrictionId,
           project_id: projectId,
-          restriction_date: dateString,
+          restriction_date: currentDateString,
           time_from: timeFrom,
           time_to: timeTo,
           type: restrictionType,
-          betroffene_gleise: trackIds,  // This is already an array of UUIDs
+          betroffene_gleise: trackIds,
           comment: comment || null
         });
-        
-        // Move to next day
-        currentDate.setDate(currentDate.getDate() + 1);
       }
       
       // Insert all daily records
       if (dailyRecords.length > 0) {
-        console.log(`Inserting ${dailyRecords.length} daily records for restriction ${restrictionId}`, 
-          dailyRecords[0]); // Log the first record for debugging
+        console.log(`Generated ${dailyRecords.length} daily records for restriction ${restrictionId}:`);
+        console.log('First record:', dailyRecords[0]);
+        console.log('Last record:', dailyRecords[dailyRecords.length-1]);
         
         // Add explicit type casting for the betroffene_gleise array
-        // This is needed when Supabase can't infer the right type
         const processedRecords = dailyRecords.map(record => ({
           ...record,
           betroffene_gleise: record.betroffene_gleise // PostgreSQL will handle this as UUID[]
         }));
         
-        // Try to insert records one by one if bulk insert fails
+        // Try to insert records
         try {
           const { error, data } = await supabaseClient
             .from('daily_restrictions')
@@ -823,14 +869,14 @@ export async function expandRestriction(
     else if (repetitionPattern === 'daily') {
       // For daily pattern, the date is less important - we'll just use the start date
       // but time_from and time_to are critical
-      const dateString = start.toISOString().split('T')[0]; // YYYY-MM-DD
+      const dateString = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
       
       const dailyRecord = {
         original_restriction_id: restrictionId,
         project_id: projectId,
         restriction_date: dateString,
-        time_from: timeFrom,
-        time_to: timeTo,
+        time_from: originalTimeFrom,
+        time_to: originalTimeTo,
         type: restrictionType,
         betroffene_gleise: trackIds,  // This is already an array of UUIDs
         comment: comment || null
@@ -860,7 +906,6 @@ export async function expandRestriction(
         throw insertError;
       }
     }
-    // Weekly and monthly patterns would follow similar logic to daily
     
     return {
       success: true
