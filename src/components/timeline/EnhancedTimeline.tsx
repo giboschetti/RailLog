@@ -49,7 +49,7 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
   const [isTripDrawerOpen, setIsTripDrawerOpen] = useState(false);
   const [isWagonDrawerOpen, setIsWagonDrawerOpen] = useState(false);
 
-  // Calculate timeline slider range
+  // Calculate timeline slider range with proper fallbacks
   const startDate = project?.start_date 
     ? new Date(project.start_date) 
     : new Date(new Date().setFullYear(new Date().getFullYear() - 1)); // Default to 1 year ago
@@ -176,6 +176,11 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
       
       if (!error && data) {
         setProject(data);
+        
+        // If project has a start date, use it
+        if (data.start_date) {
+          setDate(new Date(data.start_date).toISOString());
+        }
       }
     };
     
@@ -291,7 +296,7 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
       
       // If today is outside the project timeframe, use project start date
       if (today < projectStart || today > projectEnd) {
-        setDate(projectStart.toISOString());
+        // Don't do anything if the button is disabled
         return;
       }
     }
@@ -354,6 +359,17 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     return `${dayName}, ${formatDate(date)}`;
   };
 
+  // Check if today is outside the project date range
+  const isTodayOutsideProjectRange = () => {
+    if (!project?.start_date || !project?.end_date) return false;
+    
+    const today = new Date();
+    const projectStart = new Date(project.start_date);
+    const projectEnd = new Date(project.end_date);
+    
+    return today < projectStart || today > projectEnd;
+  };
+
   if (loading) {
     return (
       <div className="p-8">
@@ -398,7 +414,9 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
             </button>
             <button
               onClick={goToToday}
-              className="px-3 py-1 bg-primary text-white rounded hover:bg-primary-dark ml-2"
+              className={`px-3 py-1 ${isTodayOutsideProjectRange() ? 'bg-gray-300 cursor-not-allowed' : 'bg-primary hover:bg-primary-dark'} text-white rounded ml-2`}
+              disabled={isTodayOutsideProjectRange()}
+              title={isTodayOutsideProjectRange() ? "Heute ist außerhalb des Projektzeitraums" : "Zum heutigen Tag"}
             >
               Heute
             </button>

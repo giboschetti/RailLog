@@ -307,6 +307,11 @@ const TripModal: React.FC<TripModalProps> = ({
         throw new Error('Bitte wählen Sie ein Quellgleis aus.');
       }
       
+      // For departures and internal trips, wagons must be selected
+      if ((type === 'internal' || type === 'departure') && selectedExistingWagons.length === 0) {
+        throw new Error('Bitte wählen Sie mindestens einen Waggon aus.');
+      }
+      
       // Run validation before proceeding
       if (!skipValidationCheck) {
         const isValid = await validateTrip();
@@ -362,10 +367,10 @@ const TripModal: React.FC<TripModalProps> = ({
       
       // Handle wagons assignment
       if (tripId) {
-        if (type === 'internal' && selectedExistingWagons.length > 0) {
-          console.log(`Processing ${selectedExistingWagons.length} existing wagons for internal trip`);
+        if ((type === 'internal' || type === 'departure') && selectedExistingWagons.length > 0) {
+          console.log(`Processing ${selectedExistingWagons.length} existing wagons for ${type} trip`);
           
-          // For internal trips, first clear any existing associations (for updates)
+          // For internal and departure trips, first clear any existing associations (for updates)
           if (trip) {
             const { error: clearError } = await supabase
               .from('trip_wagons')
@@ -396,22 +401,35 @@ const TripModal: React.FC<TripModalProps> = ({
           }
           
           // For executed trips (not planned), update the wagons' current track
-          if (!isPlanned && destTrackId) {
+          if (!isPlanned) {
             // Get the IDs of all selected wagons
             const wagonIds = selectedExistingWagons.map(wagon => wagon.id);
             
-            // Update all selected wagons in a single operation
-            const { error: updateWagonsError } = await supabase
-              .from('wagons')
-              .update({ current_track_id: destTrackId })
-              .in('id', wagonIds);
-            
-            if (updateWagonsError) {
-              console.error('Error updating wagon tracks:', updateWagonsError);
-              throw new Error(`Fehler beim Aktualisieren der Waggons: ${updateWagonsError.message}`);
+            if (type === 'internal' && destTrackId) {
+              // For internal trips, update to destination track
+              const { error: updateWagonsError } = await supabase
+                .from('wagons')
+                .update({ current_track_id: destTrackId })
+                .in('id', wagonIds);
+              
+              if (updateWagonsError) {
+                console.error('Error updating wagon tracks:', updateWagonsError);
+                throw new Error(`Fehler beim Aktualisieren der Waggons: ${updateWagonsError.message}`);
+              }
+            } else if (type === 'departure') {
+              // For departure trips, set current_track_id to null to remove from system
+              const { error: updateWagonsError } = await supabase
+                .from('wagons')
+                .update({ current_track_id: null })
+                .in('id', wagonIds);
+              
+              if (updateWagonsError) {
+                console.error('Error removing wagons from system:', updateWagonsError);
+                throw new Error(`Fehler beim Entfernen der Waggons: ${updateWagonsError.message}`);
+              }
             }
           }
-        } else if ((type === 'delivery' || type === 'departure') && wagonGroups.length > 0) {
+        } else if (type === 'delivery' && wagonGroups.length > 0) {
           // Process each wagon group (for delivery and departure trips)
           for (const group of wagonGroups) {
             // Find the selected wagon type
@@ -856,42 +874,43 @@ const TripModal: React.FC<TripModalProps> = ({
             </div>
           </div>
 
-          <div className="mb-6">
-            <h3 className="text-md font-medium mb-2">
-              {type === 'internal' 
-                ? 'Waggons zum Verschieben'  
-                : 'Waggons'}
-            </h3>
+          <div className="space-y-4 mt-6">
+            <h3 className="text-lg font-semibold">Waggons</h3>
             
-            {type === 'internal' ? (
-              sourceTrackId && dateTime ? (
-                <InternalTripWagonSelector
-                  projectId={project.id}
-                  sourceTrackId={sourceTrackId}
-                  datetime={dateTime}
-                  wagonTypes={wagonTypes}
-                  onWagonsSelected={handleExistingWagonsSelected}
-                />
-              ) : (
-                <div className="py-4 text-center text-gray-500">
-                  Bitte wählen Sie zuerst Quellgleis, Zielgleis, Datum und Uhrzeit aus.
+            {/* For internal trips and departures, select existing wagons from source track */}
+            {(type === 'internal' || type === 'departure') && sourceTrackId ? (
+              <InternalTripWagonSelector
+                projectId={project.id}
+                sourceTrackId={sourceTrackId}
+                datetime={dateTime}
+                wagonTypes={wagonTypes}
+                onWagonsSelected={setSelectedExistingWagons}
+              />
+            ) : null}
+            
+            {/* For deliveries, create new wagons */}
+            {type === 'delivery' && (
+              <div className="space-y-4">
+                <div className="bg-blue-50 p-4 rounded-md">
+                  <p className="text-blue-600 text-sm">
+                    Für Anlieferungen müssen Sie neue Waggons erstellen.
+                  </p>
                 </div>
-              )
-            ) : (
-              <>
+                
                 <WagonGroupForm 
                   onAddGroup={handleAddWagonGroup} 
-                  projectId={project.id} 
+                  wagonTypes={wagonTypes}
+                  projectId={project.id}
                 />
                 
                 <WagonGroupList 
                   wagonGroups={wagonGroups} 
+                  onRemoveGroup={handleRemoveWagonGroup}
                   wagonTypes={wagonTypes}
                   projectId={project.id}
-                  onRemoveGroup={handleRemoveWagonGroup}
                   onUpdateWagons={handleUpdateWagons}
                 />
-              </>
+              </div>
             )}
           </div>
 
@@ -901,7 +920,7 @@ const TripModal: React.FC<TripModalProps> = ({
             </div>
           )}
 
-          <div className="flex justify-end space-x-3">
+          <div className="flex justify-end space-x-4">
             <button
               type="button"
               onClick={onClose}
