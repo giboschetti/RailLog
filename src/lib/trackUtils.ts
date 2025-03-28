@@ -176,7 +176,7 @@ export async function checkTrackCapacity(
     let wagonsQuery = supabase
       .from('wagons')
       .select('id, length')
-      .eq('track_id', trackId);
+      .eq('current_track_id', trackId);
     
     // If tripId is provided, exclude wagons that are being moved in this trip
     if (tripId) {
@@ -202,7 +202,17 @@ export async function checkTrackCapacity(
     const trackLength = track.useful_length || 0;
     
     // Check if adding these wagons would exceed capacity
+    // Skip check if track has unlimited capacity (useful_length = 0)
     const hasCapacity = trackLength === 0 || currentUsage + wagonLength <= trackLength;
+    
+    console.log(`Track capacity check:`, {
+      trackId,
+      trackLength,
+      currentUsage,
+      wagonLength,
+      remainingSpace: trackLength - currentUsage,
+      hasCapacity
+    });
     
     return {
       hasCapacity,
@@ -222,64 +232,76 @@ export async function checkTrackCapacity(
 }
 
 /**
- * Check if a track has enough capacity for a trip
+ * Check track capacity specifically for a trip at a given time
  * @param trackId The track ID to check
- * @param datetime The date and time to check capacity for
- * @param wagonsLength Total length of wagons to add
- * @param tripId Optional trip ID to exclude wagons that are being moved
+ * @param tripDateTime The datetime of the trip
+ * @param wagonLength Total length of wagons to add
  * @returns Object containing result of check and details
  */
 export async function checkTrackCapacityForTrip(
-  trackId: string, 
-  datetime: string, 
-  wagonsLength: number,
-  tripId?: string
-): Promise<{
-  hasCapacity: boolean;
-  message?: string;
-  availableLength?: number;
-  requiredLength?: number;
-}> {
-  console.log(`Checking capacity for track ${trackId} at ${datetime} for wagons length ${wagonsLength}`);
-  
+  trackId: string,
+  tripDateTime: string,
+  wagonLength: number
+) {
   try {
-    // First try time-based capacity check
-    const occupancyResult = await getTrackOccupancyAtTime(trackId, datetime);
+    // Get track information
+    const { data: trackData, error: trackError } = await supabase
+      .from('tracks')
+      .select('*')
+      .eq('id', trackId)
+      .single();
     
-    if (occupancyResult.success) {
-      // Use the time-based result
-      const availableLength = occupancyResult.availableLength || 0;
-      const totalLength = occupancyResult.totalLength || 0;
-      
-      if (totalLength === 0) {
-        // Track has no length limit
-        return { 
-          hasCapacity: true,
-          message: "Gleis hat keine Längenbegrenzung"
-        };
-      }
-      
-      const hasCapacity = availableLength >= wagonsLength;
-      
-      return {
-        hasCapacity,
-        message: hasCapacity 
-          ? `Gleis hat genügend Kapazität: ${availableLength}m verfügbar, ${wagonsLength}m benötigt` 
-          : `Nicht genügend Kapazität: ${availableLength}m verfügbar, ${wagonsLength}m benötigt`,
-        availableLength,
-        requiredLength: wagonsLength
-      };
-    } else {
-      console.log("Time-based capacity check failed, falling back to legacy check:", occupancyResult.errorMessage);
-      
-      // Fall back to legacy capacity check
-      return await checkTrackCapacity(trackId, wagonsLength, tripId);
-    }
+    if (trackError) throw trackError;
+    if (!trackData) throw new Error('Track not found');
+    
+    const track = trackData;
+    
+    // Get wagons currently on this track
+    const { data: wagonsData, error: wagonsError } = await supabase
+      .from('wagons')
+      .select('id, length')
+      .eq('current_track_id', trackId);
+    
+    if (wagonsError) throw wagonsError;
+    
+    // Calculate current usage
+    const currentUsage = wagonsData.reduce((total, wagon) => total + (wagon.length || 0), 0);
+    
+    // Track's useful_length
+    const trackLength = track.useful_length || 0;
+    
+    // Check if adding these wagons would exceed capacity
+    // Skip check if track has unlimited capacity (useful_length = 0)
+    const hasCapacity = trackLength === 0 || currentUsage + wagonLength <= trackLength;
+    
+    // Calculate available length
+    const availableLength = trackLength - currentUsage;
+    
+    console.log(`Track capacity check for trip:`, {
+      trackId,
+      trackLength,
+      currentUsage,
+      wagonLength,
+      availableLength,
+      tripDateTime,
+      hasCapacity
+    });
+    
+    return {
+      hasCapacity,
+      currentUsage,
+      availableLength,
+      trackLength,
+      additionalLength: wagonLength,
+      track
+    };
   } catch (error: any) {
-    console.error("Error in checkTrackCapacityForTrip:", error);
-    
-    // Fall back to legacy capacity check on error
-    return await checkTrackCapacity(trackId, wagonsLength, tripId);
+    console.error('Error checking track capacity for trip:', error);
+    return {
+      hasCapacity: false,
+      error: error.message,
+      availableLength: 0
+    };
   }
 }
 
@@ -742,21 +764,23 @@ export async function expandRestriction(
     if (repetitionPattern === 'once') {
       const dailyRecords = [];
       
+      // FIX: Properly extract year, month, and day directly from the original Date objects
+      // to avoid timezone shift issues when creating date-only objects
+      const startYear = startDate.getFullYear();
+      const startMonth = startDate.getMonth(); 
+      const startDay = startDate.getDate();
+      
+      const endYear = endDate.getFullYear();
+      const endMonth = endDate.getMonth();
+      const endDay = endDate.getDate();
+      
       // Create dates without time component for date comparison
-      // Use UTC methods to avoid timezone issues
-      const startDateOnly = new Date(Date.UTC(
-        startDate.getUTCFullYear(),
-        startDate.getUTCMonth(),
-        startDate.getUTCDate()
-      ));
+      // Using the local date components to create UTC date objects
+      const startDateOnly = new Date(Date.UTC(startYear, startMonth, startDay));
+      const endDateOnly = new Date(Date.UTC(endYear, endMonth, endDay));
       
-      const endDateOnly = new Date(Date.UTC(
-        endDate.getUTCFullYear(),
-        endDate.getUTCMonth(),
-        endDate.getUTCDate()
-      ));
-      
-      console.log(`Date comparison values:
+      console.log(`Fixed date comparison values:
+      - Using local date parts: ${startYear}-${startMonth+1}-${startDay} to ${endYear}-${endMonth+1}-${endDay}
       - startDateOnly: ${startDateOnly.toISOString()}
       - endDateOnly: ${endDateOnly.toISOString()}`);
       
@@ -770,9 +794,9 @@ export async function expandRestriction(
       for (let i = 0; i < dayDiff; i++) {
         // Clone the start date and add days
         const currentDate = new Date(Date.UTC(
-          startDateOnly.getUTCFullYear(),
-          startDateOnly.getUTCMonth(),
-          startDateOnly.getUTCDate() + i
+          startYear,
+          startMonth,
+          startDay + i
         ));
         
         // Format as YYYY-MM-DD for database

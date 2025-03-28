@@ -6,9 +6,14 @@ import { v4 as uuidv4 } from 'uuid';
 interface WagonGroupFormProps {
   onAddGroup: (group: WagonGroup) => void;
   projectId: string;
+  wagonTypes?: WagonType[];
 }
 
-const WagonGroupForm: React.FC<WagonGroupFormProps> = ({ onAddGroup, projectId }) => {
+const WagonGroupForm: React.FC<WagonGroupFormProps> = ({ 
+  onAddGroup, 
+  projectId, 
+  wagonTypes: propWagonTypes
+}) => {
   const { supabase } = useSupabase();
   const [wagonTypes, setWagonTypes] = useState<WagonType[]>([]);
   const [loading, setLoading] = useState(true);
@@ -18,8 +23,19 @@ const WagonGroupForm: React.FC<WagonGroupFormProps> = ({ onAddGroup, projectId }
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [debugInfo, setDebugInfo] = useState<string | null>(null);
 
-  // Fetch wagon types on component mount
+  // Fetch wagon types on component mount, unless provided as props
   useEffect(() => {
+    // If wagon types are provided as props, use those instead of fetching
+    if (propWagonTypes && propWagonTypes.length > 0) {
+      setWagonTypes(propWagonTypes);
+      // Set default selected type if available
+      if (propWagonTypes.length > 0) {
+        setSelectedTypeId(propWagonTypes[0].id);
+      }
+      setLoading(false);
+      return;
+    }
+
     const fetchWagonTypes = async () => {
       try {
         setLoading(true);

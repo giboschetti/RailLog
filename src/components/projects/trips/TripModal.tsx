@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { validateDelivery } from '@/lib/tripValidation';
 import { ValidationWarning } from '@/lib/tripValidation';
 import ValidationWarnings from './ValidationWarnings';
+import { checkTrackCapacityForTrip } from '@/lib/trackUtils';
 
 interface TripModalProps {
   isOpen: boolean;
@@ -291,256 +292,238 @@ const TripModal: React.FC<TripModalProps> = ({
     e.preventDefault();
     setLoading(true);
     setError(null);
-    
+
     try {
-      // Validate required fields
-      if (!dateTime) {
-        throw new Error('Bitte geben Sie ein Datum und eine Uhrzeit an.');
-      }
-      
-      // For internal trips, both source and destination tracks are required
-      if (type === 'internal' && (!sourceTrackId || !destTrackId)) {
-        throw new Error('Bitte wählen Sie sowohl ein Quell- als auch ein Zielgleis aus.');
-      }
-      
-      // For deliveries, only destination track is required
-      if (type === 'delivery' && !destTrackId) {
-        throw new Error('Bitte wählen Sie ein Zielgleis aus.');
-      }
-      
-      // For departures, only source track is required
-      if (type === 'departure' && !sourceTrackId) {
-        throw new Error('Bitte wählen Sie ein Quellgleis aus.');
-      }
-      
-      // For departures and internal trips, wagons must be selected
-      if ((type === 'internal' || type === 'departure') && selectedExistingWagons.length === 0) {
-        throw new Error('Bitte wählen Sie mindestens einen Waggon aus.');
-      }
-      
-      // For deliveries, validate using the new validation function
-      if (type === 'delivery' && !skipValidationCheck) {
-        const validationResult = await validateDelivery({
-          projectId: project.id,
-          dateTime,
-          destTrackId,
-          wagonGroups,
-          transportPlanNumber,
-          isPlanned
-        });
-        
-        // If validation failed with errors, show the first error
-        if (!validationResult.isValid && validationResult.errors.length > 0) {
-          throw new Error(validationResult.errors[0].message);
-        }
-        
-        // If there are warnings, store them for the ValidationWarnings component
-        if (validationResult.warnings.length > 0) {
-          setValidationWarnings(validationResult.warnings);
-          setShowConfirmDialog(true);
-          setLoading(false);
-          return;
-        }
-      }
-      // For other trip types or if skipValidationCheck is true, run the old validation logic
-      else if (!skipValidationCheck) {
+      // 1. Validate form data
+      if (!skipValidationCheck) {
         const isValid = await validateTrip();
         if (!isValid) {
-          // Validation failed - let the user see the confirmation dialog
           setLoading(false);
           return;
         }
       }
-      
-      // Get transport plan file URL if file was provided
-      let transportPlanUrl = transportPlanFile 
-        ? await uploadFile(transportPlanFile) 
-        : trip?.transport_plan_number || null;
-      
-      // Prepare trip data
+
+      // 2. Prepare trip data
       const tripData = {
-        type,
-        datetime: new Date(dateTime).toISOString(),
+        project_id: project.id,
+        datetime: dateTime,
+        type: type,
         source_track_id: sourceTrackId || null,
         dest_track_id: destTrackId || null,
-        project_id: project.id,
-        transport_plan_number: transportPlanUrl,
+        transport_plan_number: transportPlanNumber || null,
+        transport_company: null, // Assuming no transport company is provided
+        construction_site_id: null, // Assuming no construction site is provided
         is_planned: isPlanned,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        has_conflicts: hasCapacityIssue || hasRestrictions, // Set flag if there are issues
-        comment: comment || null
+        has_conflict: false, // Default value
+        file_url: transportPlanFile ? await uploadFile(transportPlanFile) : null,
       };
-      
-      let tripId = trip?.id;
+
+      console.log('Submitting trip:', tripData);
+
+      // 3. For delivery trips, pre-check capacity before creating anything
+      if (type === 'delivery' && destTrackId) {
+        const totalWagonLength = getWagonsLength();
+        
+        // Check capacity before attempting to create anything
+        const capacityResult = await checkTrackCapacityForTrip(destTrackId, dateTime, totalWagonLength);
+        
+        if (!capacityResult.hasCapacity) {
+          console.error('Track capacity check failed:', capacityResult);
+          setError(`Der Zielgleis hat nicht genügend Kapazität. Verfügbar: ${capacityResult.availableLength}m, Benötigt: ${totalWagonLength}m.`);
+          setLoading(false);
+          return;
+        }
+      }
+
+      // 4. Create or update trip
+      let tripId;
+      let tripError;
       
       if (trip) {
         // Update existing trip
-        const { error: updateError } = await supabase
+        const { error } = await supabase
           .from('trips')
           .update(tripData)
           .eq('id', trip.id);
         
-        if (updateError) throw updateError;
+        tripId = trip.id;
+        tripError = error;
       } else {
         // Create new trip
-        const { data, error: insertError } = await supabase
+        const { data, error } = await supabase
           .from('trips')
           .insert(tripData)
-          .select();
+          .select()
+          .single();
         
-        if (insertError) throw insertError;
-        if (data && data.length > 0) {
-          tripId = data[0].id;
-        }
+        tripId = data?.id;
+        tripError = error;
       }
-      
-      // Handle wagons assignment
-      if (tripId) {
-        if ((type === 'internal' || type === 'departure') && selectedExistingWagons.length > 0) {
-          console.log(`Processing ${selectedExistingWagons.length} existing wagons for ${type} trip`);
+
+      if (tripError || !tripId) {
+        throw new Error(`Failed to ${trip ? 'update' : 'create'} trip: ${tripError?.message || 'Unknown error'}`);
+      }
+
+      // 5. Handle wagons based on trip type
+      if (type === 'delivery') {
+        // For delivery trips, create new wagons and link them to the trip
+        try {
+          const wagonsToCreate = [];
           
-          // For internal and departure trips, first clear any existing associations (for updates)
-          if (trip) {
-            const { error: clearError } = await supabase
-              .from('trip_wagons')
-              .delete()
-              .eq('trip_id', tripId);
-            
-            if (clearError) {
-              console.error('Error clearing existing trip wagons:', clearError);
-            }
-          }
-          
-          // Create a batch insert array for trip_wagons
-          const tripWagons = selectedExistingWagons.map(wagon => ({
-            trip_id: tripId,
-            wagon_id: wagon.id
-          }));
-          
-          // Insert all trip_wagons in a single operation
-          if (tripWagons.length > 0) {
-            const { error: tripWagonsError } = await supabase
-              .from('trip_wagons')
-              .insert(tripWagons);
-            
-            if (tripWagonsError) {
-              console.error('Error linking wagons to trip:', tripWagonsError);
-              throw new Error(`Fehler beim Zuordnen der Waggons: ${tripWagonsError.message}`);
-            }
-          }
-          
-          // For executed trips (not planned), update the wagons' current track
-          if (!isPlanned) {
-            // Get the IDs of all selected wagons
-            const wagonIds = selectedExistingWagons.map(wagon => wagon.id);
-            
-            if (type === 'internal' && destTrackId) {
-              // For internal trips, update to destination track
-              const { error: updateWagonsError } = await supabase
-                .from('wagons')
-                .update({ current_track_id: destTrackId })
-                .in('id', wagonIds);
-              
-              if (updateWagonsError) {
-                console.error('Error updating wagon tracks:', updateWagonsError);
-                throw new Error(`Fehler beim Aktualisieren der Waggons: ${updateWagonsError.message}`);
-              }
-            } else if (type === 'departure') {
-              // For departure trips, set current_track_id to null to remove from system
-              const { error: updateWagonsError } = await supabase
-                .from('wagons')
-                .update({ current_track_id: null })
-                .in('id', wagonIds);
-              
-              if (updateWagonsError) {
-                console.error('Error removing wagons from system:', updateWagonsError);
-                throw new Error(`Fehler beim Entfernen der Waggons: ${updateWagonsError.message}`);
-              }
-            }
-          }
-        } else if (type === 'delivery' && wagonGroups.length > 0) {
-          // Process each wagon group (for delivery and departure trips)
+          // Prepare all wagon data for insertion
           for (const group of wagonGroups) {
-            // Find the selected wagon type
-            const wagonType = wagonTypes.find(type => type.id === group.wagonTypeId);
-            const defaultLength = wagonType?.default_length || 0;
+            const wagonTypeId = group.wagonTypeId;
+            const wagonQuantity = group.quantity || 1;
+            const wagonContent = group.content;
             
-            // Get construction site ID from the first wagon in the group (if exists)
-            const constructionSiteId = group.wagons.length > 0 ? group.wagons[0].construction_site_id : undefined;
+            // Get the default length for this wagon type
+            const wagonType = wagonTypes.find(type => type.id === wagonTypeId);
             
-            // Create the specified quantity of wagons for this group
-            for (let i = 0; i < group.quantity; i++) {
-              const wagon = {
-                type_id: group.wagonTypeId,
-                number: null,
-                content: group.content,
+            for (let i = 0; i < wagonQuantity; i++) {
+              let wagonData = {
+                id: uuidv4(),
+                type_id: wagonTypeId,
+                length: wagonType?.default_length || 0,
+                content: wagonContent || '',
                 project_id: project.id,
-                length: defaultLength,
-                construction_site_id: constructionSiteId,
-                current_track_id: type === 'delivery' ? destTrackId : null // Set current_track_id for delivery trips
+                construction_site_id: null, // Assuming no construction site is provided
+                current_track_id: destTrackId, // Set the current track ID to the destination track
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
               };
               
-              // Log the wagon data being created for debugging
-              console.log('Creating wagon with data:', wagon);
+              wagonsToCreate.push(wagonData);
+            }
+          }
+          
+          console.log(`Creating ${wagonsToCreate.length} wagons in a single operation`);
+          
+          // Insert all wagons in a single operation
+          if (wagonsToCreate.length > 0) {
+            const { data: createdWagons, error: wagonsError } = await supabase
+              .from('wagons')
+              .insert(wagonsToCreate)
+              .select();
+            
+            if (wagonsError) {
+              // If creating wagons fails, we need to delete the trip
+              console.error('Error creating wagons:', wagonsError);
               
-              // Insert the wagon
-              const { data: wagonData, error: wagonError } = await supabase
-                .from('wagons')
-                .insert(wagon)
-                .select('id');
-              
-              if (wagonError) {
-                console.error('Error creating wagon:', wagonError);
-                console.error('Wagon data that failed:', wagon);
-                continue; // Skip this wagon but continue with others
+              // Delete the trip if it was just created
+              if (!trip) {
+                await supabase.from('trips').delete().eq('id', tripId);
               }
               
-              if (wagonData && wagonData.length > 0) {
-                // Link wagon to the trip
-                const tripWagon = {
-                  trip_id: tripId,
-                  wagon_id: wagonData[0].id
-                };
+              throw new Error(`Failed to create wagons: ${wagonsError.message}`);
+            }
+            
+            // Link wagons to the trip
+            if (createdWagons && createdWagons.length > 0) {
+              const tripWagons = createdWagons.map(wagon => ({
+                trip_id: tripId,
+                wagon_id: wagon.id
+              }));
+              
+              const { error: linkError } = await supabase
+                .from('trip_wagons')
+                .insert(tripWagons);
+              
+              if (linkError) {
+                console.error('Error linking wagons to trip:', linkError);
                 
-                await supabase
-                  .from('trip_wagons')
-                  .insert(tripWagon);
-                
-                // For delivery trips, make sure the wagon is updated with current track
-                if (type === 'delivery' && !isPlanned && destTrackId) {
-                  await supabase
-                    .from('wagons')
-                    .update({ current_track_id: destTrackId })
-                    .eq('id', wagonData[0].id);
+                // If linking fails, delete the created wagons and trip
+                if (!trip) {
+                  // Delete all created wagons
+                  const wagonIds = createdWagons.map(w => w.id);
+                  await supabase.from('wagons').delete().in('id', wagonIds);
+                  
+                  // Delete the trip
+                  await supabase.from('trips').delete().eq('id', tripId);
                 }
+                
+                throw new Error(`Failed to link wagons to trip: ${linkError.message}`);
               }
+            }
+          }
+        } catch (error: any) {
+          console.error('Error in wagon creation process:', error);
+          setError(`Fehler beim Erstellen der Waggons: ${error.message}`);
+          setLoading(false);
+          return;
+        }
+      } else if (type === 'departure') {
+        // For departure trips, link existing wagons to the trip
+        const tripWagons = selectedExistingWagons.map(wagon => ({
+          trip_id: tripId,
+          wagon_id: wagon.id
+        }));
+        
+        if (tripWagons.length > 0) {
+          const { error: linkError } = await supabase
+            .from('trip_wagons')
+            .insert(tripWagons);
+          
+          if (linkError) {
+            console.error('Error linking wagons to departure trip:', linkError);
+            
+            // If linking fails and this is a new trip, delete the trip
+            if (!trip) {
+              await supabase.from('trips').delete().eq('id', tripId);
+            }
+            
+            throw new Error(`Failed to link wagons to departure trip: ${linkError.message}`);
+          }
+        }
+      } else if (type === 'internal') {
+        // For internal trips, link existing wagons and update their current_track_id
+        const tripWagons = selectedExistingWagons.map(wagon => ({
+          trip_id: tripId,
+          wagon_id: wagon.id
+        }));
+        
+        if (tripWagons.length > 0) {
+          // Link wagons to trip
+          const { error: linkError } = await supabase
+            .from('trip_wagons')
+            .insert(tripWagons);
+          
+          if (linkError) {
+            console.error('Error linking wagons to internal trip:', linkError);
+            
+            // If linking fails and this is a new trip, delete the trip
+            if (!trip) {
+              await supabase.from('trips').delete().eq('id', tripId);
+            }
+            
+            throw new Error(`Failed to link wagons to internal trip: ${linkError.message}`);
+          }
+          
+          // If the trip is executed, update the wagon's current track ID
+          if (!isPlanned && destTrackId) {
+            const wagonIds = selectedExistingWagons.map(w => w.id);
+            
+            const { error: updateError } = await supabase
+              .from('wagons')
+              .update({ current_track_id: destTrackId })
+              .in('id', wagonIds);
+            
+            if (updateError) {
+              console.error('Error updating wagon current_track_id:', updateError);
+              // We don't need to roll back, as the trip and link are valid
+              // Just log the error and show a warning
+              console.warn('Wagons were not moved to the destination track due to an error');
             }
           }
         }
       }
-      
-      // Show success message
-      toast({
-        title: trip ? "Fahrt aktualisiert" : "Fahrt erstellt",
-        description: `Die Fahrt wurde erfolgreich ${trip ? 'aktualisiert' : 'erstellt'}${hasCapacityIssue || hasRestrictions ? ', aber mit möglichen Konflikten.' : '.'}`,
-        variant: hasCapacityIssue || hasRestrictions ? "destructive" : "default"
-      });
-      
-      // Close modal and refresh trips list
+
+      // Success! Close the modal and notify parent
+      console.log('Trip submitted successfully');
+      onTripSubmitted();
       onClose();
-      if (onTripSubmitted) {
-        onTripSubmitted();
-      }
     } catch (error: any) {
       console.error('Error submitting trip:', error);
-      setError(error.message || 'Ein Fehler ist aufgetreten');
-      
-      toast({
-        title: "Fehler",
-        description: error.message || "Fehler beim Speichern der Fahrt",
-        variant: "destructive"
-      });
+      setError(`Fehler beim Speichern: ${error.message}`);
     } finally {
       setLoading(false);
     }

@@ -8,8 +8,8 @@
  * - Middle days: 00:00 to 23:59 (full day)
  * - Last day: 00:00 to original end time
  * 
- * IMPORTANT: This version includes the fix for end date handling to ensure the actual end date
- * is properly included in the generated daily restrictions.
+ * IMPORTANT: This version includes the fix for date component extraction to properly handle
+ * timezone differences and ensure the actual end date is included in the generated daily restrictions.
  */
 
 import { supabase } from '@/lib/supabase';
@@ -50,6 +50,7 @@ async function regenerateDailyRestrictions() {
     for (const restriction of restrictions || []) {
       try {
         console.log(`Processing restriction: ${restriction.id}`);
+        console.log(`Date range: ${restriction.start_datetime || restriction.from_datetime} to ${restriction.end_datetime || restriction.to_datetime}`);
         
         // Get associated tracks
         const { data: tracks, error: tracksError } = await supabase
@@ -65,17 +66,30 @@ async function regenerateDailyRestrictions() {
         console.log(`Found ${trackIds.length} tracks for restriction ${restriction.id}`);
         
         // Process each restriction type
-        const restrictionTypes = Array.isArray(restriction.restriction_types) 
-          ? restriction.restriction_types 
-          : [restriction.restriction_types];
+        let restrictionTypes = [];
+        
+        // Handle different data structures for restriction types
+        if (Array.isArray(restriction.restriction_types)) {
+          restrictionTypes = restriction.restriction_types;
+        } else if (restriction.restriction_types) {
+          restrictionTypes = [restriction.restriction_types];
+        } else if (restriction.type) {
+          restrictionTypes = [restriction.type];
+        } else {
+          console.warn(`No restriction type found for restriction ${restriction.id}`);
+          continue;
+        }
+        
+        console.log(`Processing ${restrictionTypes.length} restriction types: ${restrictionTypes.join(', ')}`);
         
         for (const type of restrictionTypes) {
+          // Use the fixed expandRestriction function to create daily records
           const result = await expandRestriction(
             restriction.id,
             restriction.project_id,
             restriction.start_datetime || restriction.from_datetime, // Handle both field names
             restriction.end_datetime || restriction.to_datetime,     // Handle both field names
-            restriction.repetition_pattern || restriction.recurrence, // Handle both field names
+            restriction.repetition_pattern || restriction.recurrence || 'once', // Handle both field names with default
             type,
             trackIds,
             restriction.comment
@@ -83,6 +97,8 @@ async function regenerateDailyRestrictions() {
           
           if (!result.success) {
             throw new Error(`Failed to expand restriction ${restriction.id} with type ${type}: ${JSON.stringify(result.error)}`);
+          } else {
+            console.log(`Successfully expanded restriction ${restriction.id} with type ${type}`);
           }
         }
         
@@ -94,7 +110,15 @@ async function regenerateDailyRestrictions() {
       }
     }
     
-    console.log(`Regeneration completed. Processed ${processedCount} restrictions with ${errorCount} errors.`);
+    console.log(`===== REGENERATION SUMMARY =====`);
+    console.log(`Total restrictions: ${restrictions?.length || 0}`);
+    console.log(`Successfully processed: ${processedCount}`);
+    console.log(`Errors: ${errorCount}`);
+    if (errorCount > 0) {
+      console.log(`Some restrictions failed to process. Check the logs above for details.`);
+    } else {
+      console.log(`All restrictions were successfully processed.`);
+    }
   } catch (error) {
     console.error('Regeneration failed:', error);
   }

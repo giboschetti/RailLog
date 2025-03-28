@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { checkTrackCapacity, checkTripRestrictions } from './trackUtils';
+import { checkTrackCapacity, checkTrackCapacityForTrip } from './trackUtils';
 import { TripType, Wagon, WagonGroup } from './supabase';
 
 export interface ValidationResult {
@@ -9,15 +9,26 @@ export interface ValidationResult {
 }
 
 export interface ValidationError {
-  code: string;
+  code?: string;
+  field: string;
   message: string;
-  field?: string;
+  details?: any;
 }
 
 export interface ValidationWarning {
-  code: string;
+  code?: string;
+  type?: string;
   message: string;
   details?: any;
+}
+
+export interface DeliveryTripData {
+  projectId: string;
+  dateTime: string;
+  destTrackId: string;
+  wagonGroups: WagonGroup[];
+  transportPlanNumber?: string;
+  isPlanned: boolean;
 }
 
 export interface DeliveryValidationParams {
@@ -31,152 +42,159 @@ export interface DeliveryValidationParams {
 
 /**
  * Validates a delivery trip
- * @param params Delivery trip parameters
- * @returns Validation result with errors and warnings
+ * @param deliveryData The delivery trip data to validate
+ * @returns ValidationResult with errors and warnings
  */
-export async function validateDelivery(params: DeliveryValidationParams): Promise<ValidationResult> {
-  const { projectId, dateTime, destTrackId, wagonGroups, isPlanned } = params;
+export async function validateDelivery(deliveryData: DeliveryTripData): Promise<ValidationResult> {
   const errors: ValidationError[] = [];
   const warnings: ValidationWarning[] = [];
-
-  // 1. Basic data validation
-  if (!dateTime) {
+  
+  // Required fields validation
+  if (!deliveryData.destTrackId) {
     errors.push({
-      code: 'MISSING_DATETIME',
-      message: 'Bitte geben Sie ein Datum und eine Uhrzeit an.',
-      field: 'dateTime'
+      field: 'destTrackId',
+      message: 'Destination track is required for deliveries'
     });
-  } else {
-    // Validate that date is within project timeframe
-    const dateObj = new Date(dateTime);
-    const { data: projectData } = await supabase
-      .from('projects')
-      .select('start_date, end_date')
-      .eq('id', projectId)
+  }
+  
+  if (!deliveryData.dateTime) {
+    errors.push({
+      field: 'dateTime',
+      message: 'Date and time are required'
+    });
+  }
+  
+  if (!deliveryData.wagonGroups || deliveryData.wagonGroups.length === 0) {
+    errors.push({
+      field: 'wagonGroups',
+      message: 'At least one wagon group is required'
+    });
+  }
+  
+  // If there are input validation errors, return them immediately
+  if (errors.length > 0) {
+    return {
+      isValid: false,
+      errors,
+      warnings
+    };
+  }
+  
+  // Calculate the total length of all wagons in this delivery
+  let totalWagonLength = 0;
+  let wagonCount = 0;
+  
+  for (const group of deliveryData.wagonGroups) {
+    // Skip groups without types or quantities
+    if (!group.wagonTypeId || !group.quantity) continue;
+    
+    // Get wagon type details for length
+    const { data: wagonType } = await supabase
+      .from('wagon_types')
+      .select('default_length')
+      .eq('id', group.wagonTypeId)
       .single();
-
-    if (projectData) {
-      const projectStart = projectData.start_date ? new Date(projectData.start_date) : null;
-      const projectEnd = projectData.end_date ? new Date(projectData.end_date) : null;
-
-      if (projectStart && dateObj < projectStart) {
-        warnings.push({
-          code: 'DATE_BEFORE_PROJECT',
-          message: 'Das gewählte Datum liegt vor dem Projektbeginn.',
-          details: { projectStart: projectData.start_date }
-        });
-      }
-
-      if (projectEnd && dateObj > projectEnd) {
-        warnings.push({
-          code: 'DATE_AFTER_PROJECT',
-          message: 'Das gewählte Datum liegt nach dem Projektende.',
-          details: { projectEnd: projectData.end_date }
-        });
-      }
+    
+    if (wagonType) {
+      totalWagonLength += (wagonType.default_length * group.quantity);
+      wagonCount += group.quantity;
     }
   }
-
-  if (!destTrackId) {
+  
+  // Skip capacity check if no wagons to add
+  if (totalWagonLength === 0 || wagonCount === 0) {
     errors.push({
-      code: 'MISSING_DEST_TRACK',
-      message: 'Bitte wählen Sie ein Zielgleis aus.',
-      field: 'destTrackId'
+      field: 'wagonGroups',
+      message: 'At least one valid wagon with type and quantity is required'
     });
+    return {
+      isValid: false,
+      errors,
+      warnings
+    };
   }
-
-  if (!wagonGroups || wagonGroups.length === 0) {
-    errors.push({
-      code: 'NO_WAGONS',
-      message: 'Bitte fügen Sie mindestens eine Waggongruppe hinzu.',
-      field: 'wagonGroups'
-    });
-  }
-
-  // Return early if there are basic errors to prevent unnecessary API calls
-  if (errors.length > 0) {
-    return { isValid: false, errors, warnings };
-  }
-
-  // 2. Check track capacity
-  if (destTrackId) {
+  
+  // Check track capacity
+  if (deliveryData.destTrackId) {
     try {
-      // Calculate total length of wagons being delivered
-      const totalWagonLength = await calculateTotalWagonLength(wagonGroups);
+      // Get track details to check capacity
+      const { data: trackData } = await supabase
+        .from('tracks')
+        .select('id, name, useful_length')
+        .eq('id', deliveryData.destTrackId)
+        .single();
       
-      // Check capacity on destination track
-      const capacityResult = await checkTrackCapacity(destTrackId, totalWagonLength);
-      
-      if (!capacityResult.hasCapacity) {
-        warnings.push({
-          code: 'INSUFFICIENT_CAPACITY',
-          message: 'Das Zielgleis hat nicht genügend Kapazität für die angegebenen Waggons.',
-          details: {
-            trackLength: capacityResult.trackLength,
-            currentUsage: capacityResult.currentUsage,
-            requiredLength: totalWagonLength,
-            availableSpace: capacityResult.availableSpace
-          }
-        });
+      if (trackData) {
+        // Get current track usage
+        const capacityResult = await checkTrackCapacityForTrip(
+          deliveryData.destTrackId,
+          deliveryData.dateTime,
+          totalWagonLength
+        );
+        
+        if (!capacityResult.hasCapacity) {
+          // Treat capacity issues as errors instead of warnings
+          errors.push({
+            field: 'destTrackId',
+            message: `Insufficient capacity on track "${trackData.name}". Available: ${capacityResult.availableLength || 0}m, Required: ${totalWagonLength}m.`,
+            details: {
+              trackId: deliveryData.destTrackId,
+              trackName: trackData.name,
+              availableLength: capacityResult.availableLength || 0,
+              requiredLength: totalWagonLength,
+              overCapacityBy: totalWagonLength - (capacityResult.availableLength || 0)
+            }
+          });
+        }
       }
     } catch (error: any) {
       console.error('Error checking track capacity:', error);
-      warnings.push({
-        code: 'CAPACITY_CHECK_ERROR',
-        message: 'Fehler bei der Überprüfung der Gleiskapazität.',
-        details: { error: error.message }
+      errors.push({
+        field: 'destTrackId', 
+        message: `Error checking track capacity: ${error.message}`
       });
     }
   }
-
-  // 3. Check track restrictions
-  try {
-    const restrictionsResult = await checkTripRestrictions('delivery', dateTime, undefined, destTrackId);
+  
+  // Check for time-based restrictions
+  if (deliveryData.dateTime && deliveryData.destTrackId) {
+    const tripDate = new Date(deliveryData.dateTime);
     
-    if (restrictionsResult.hasRestrictions) {
-      warnings.push({
-        code: 'ACTIVE_RESTRICTIONS',
-        message: 'Es gibt aktive Einschränkungen für das Zielgleis zum gewählten Zeitpunkt.',
-        details: { restrictions: restrictionsResult.restrictions }
-      });
-    }
-  } catch (error: any) {
-    console.error('Error checking restrictions:', error);
-    warnings.push({
-      code: 'RESTRICTIONS_CHECK_ERROR',
-      message: 'Fehler bei der Überprüfung der Gleiseinschränkungen.',
-      details: { error: error.message }
-    });
-  }
-
-  // 4. Check for wagon duplicates (wagons with the same number)
-  const wagonNumbers = extractWagonNumbers(wagonGroups);
-  if (wagonNumbers.length > 0) {
-    try {
-      const { data: existingWagons } = await supabase
-        .from('wagons')
-        .select('number')
-        .in('number', wagonNumbers)
-        .not('number', 'is', null);
+    // Get destination track's node
+    const { data: trackData } = await supabase
+      .from('tracks')
+      .select('node_id')
+      .eq('id', deliveryData.destTrackId)
+      .single();
+    
+    if (trackData?.node_id) {
+      // Check for "in" restrictions that would prevent delivery
+      const { data: restrictionsData } = await supabase
+        .from('restrictions')
+        .select('*')
+        .eq('type', 'in')
+        .lte('from_datetime', tripDate.toISOString())
+        .gte('to_datetime', tripDate.toISOString())
+        .or(`node_id.eq.${trackData.node_id},track_id.eq.${deliveryData.destTrackId}`);
       
-      if (existingWagons && existingWagons.length > 0) {
-        const duplicateNumbers = existingWagons.map(w => w.number);
-        warnings.push({
-          code: 'DUPLICATE_WAGON_NUMBERS',
-          message: 'Einige Waggonnummern existieren bereits im System.',
-          details: { duplicateNumbers }
-        });
+      if (restrictionsData && restrictionsData.length > 0) {
+        // If restrictions apply, add as warnings but not errors
+        for (const restriction of restrictionsData) {
+          warnings.push({
+            type: 'restriction',
+            message: `Restriction: ${restriction.comment || 'No ingress allowed'}`,
+            details: {
+              restrictionId: restriction.id,
+              restrictionType: restriction.type,
+              fromDatetime: restriction.from_datetime,
+              toDatetime: restriction.to_datetime
+            }
+          });
+        }
       }
-    } catch (error: any) {
-      console.error('Error checking for duplicate wagon numbers:', error);
-      warnings.push({
-        code: 'WAGON_CHECK_ERROR',
-        message: 'Fehler bei der Überprüfung auf doppelte Waggonnummern.',
-        details: { error: error.message }
-      });
     }
   }
-
+  
   return {
     isValid: errors.length === 0,
     errors,
@@ -248,8 +266,8 @@ function extractWagonNumbers(wagonGroups: WagonGroup[]): string[] {
     if (group.wagons) {
       group.wagons.forEach(wagon => {
         // Add only defined numbers that aren't empty
-        if (wagon.number && wagon.number.trim() !== '') {
-          numbers.push(wagon.number.trim());
+        if (wagon.number) {
+          numbers.push(wagon.number);
         }
       });
     }
