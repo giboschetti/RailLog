@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { Wagon, WagonType, Node } from '@/lib/supabase';
-import { X as XIcon, Edit as EditIcon, Save as SaveIcon } from 'lucide-react';
+import { X as XIcon, Edit as EditIcon, Save as SaveIcon, Clock as ClockIcon, Info as InfoIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/use-toast';
 import { Textarea } from '@/components/ui/textarea';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import WagonTrajectory from './WagonTrajectory';
 
 interface WagonDrawerProps {
   isOpen: boolean;
@@ -15,6 +17,18 @@ interface WagonDrawerProps {
   wagonId: string;
   onWagonUpdated: () => void;
   projectId: string;
+}
+
+// Extended Wagon type to include joined data from queries
+interface WagonWithRelations extends Wagon {
+  wagon_types?: {
+    name: string;
+    default_length: number;
+  };
+  construction_site?: {
+    id: string;
+    name: string;
+  }[];
 }
 
 const WagonDrawer: React.FC<WagonDrawerProps> = ({
@@ -26,7 +40,7 @@ const WagonDrawer: React.FC<WagonDrawerProps> = ({
 }) => {
   const { supabase } = useSupabase();
   const { toast } = useToast();
-  const [wagon, setWagon] = useState<Wagon | null>(null);
+  const [wagon, setWagon] = useState<WagonWithRelations | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -250,131 +264,149 @@ const WagonDrawer: React.FC<WagonDrawerProps> = ({
             </div>
           </div>
 
-          {isEditing ? (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleSave();
-              }}
-              className="space-y-4"
-            >
-              <div className="space-y-2">
-                <Label htmlFor="type_id">Waggontyp</Label>
-                <Select
-                  id="type_id"
-                  name="type_id"
-                  value={formData.type_id}
-                  onChange={handleTypeChange}
-                  required
-                >
-                  <option value="">Waggontyp auswählen</option>
-                  {wagonTypes.map(type => (
-                    <option key={type.id} value={type.id}>
-                      {type.name} ({type.default_length}m)
-                    </option>
-                  ))}
-                </Select>
-              </div>
+          <Tabs defaultValue="details" className="w-full">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="details" className="flex items-center">
+                <InfoIcon className="w-4 h-4 mr-2" />
+                Details
+              </TabsTrigger>
+              <TabsTrigger value="trajectory" className="flex items-center">
+                <ClockIcon className="w-4 h-4 mr-2" />
+                Bewegungsverlauf
+              </TabsTrigger>
+            </TabsList>
 
-              <div className="space-y-2">
-                <Label htmlFor="number">Waggonnummer (optional)</Label>
-                <Input
-                  id="number"
-                  name="number"
-                  value={formData.number}
-                  onChange={handleInputChange}
-                  placeholder="z.B. FWE-12345"
-                />
-              </div>
+            <TabsContent value="details">
+              {isEditing ? (
+                // Edit form
+                <div className="space-y-4">
+                  <div>
+                    <Label htmlFor="number">Waggon-Nummer</Label>
+                    <Input
+                      id="number"
+                      name="number"
+                      value={formData.number}
+                      onChange={handleInputChange}
+                      placeholder="z.B. 12345-6"
+                    />
+                  </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="length">Länge (m)</Label>
-                <Input
-                  id="length"
-                  name="length"
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={formData.length}
-                  onChange={handleInputChange}
-                  required
-                />
-              </div>
+                  <div>
+                    <Label htmlFor="type_id">Waggon-Typ</Label>
+                    <Select
+                      id="type_id"
+                      name="type_id"
+                      value={formData.type_id}
+                      onChange={handleTypeChange}
+                    >
+                      <option value="">Bitte wählen...</option>
+                      {wagonTypes.map(type => (
+                        <option key={type.id} value={type.id}>
+                          {type.name} ({type.default_length}m)
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="content">Inhalt (optional)</Label>
-                <Textarea
-                  id="content"
-                  name="content"
-                  value={formData.content}
-                  onChange={handleInputChange}
-                  placeholder="z.B. Schotter, Schwellen, etc."
-                  rows={3}
-                />
-              </div>
+                  <div>
+                    <Label htmlFor="length">Länge (m)</Label>
+                    <Input
+                      id="length"
+                      name="length"
+                      type="number"
+                      value={formData.length}
+                      onChange={handleInputChange}
+                    />
+                  </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="construction_site_id">Baustelle (optional)</Label>
-                <Select
-                  id="construction_site_id"
-                  name="construction_site_id"
-                  value={formData.construction_site_id}
-                  onChange={handleInputChange}
-                >
-                  <option value="">Keine Baustelle</option>
-                  {constructionSites.map(site => (
-                    <option key={site.id} value={site.id}>
-                      {site.name}
-                    </option>
-                  ))}
-                </Select>
-              </div>
+                  <div>
+                    <Label htmlFor="construction_site_id">Baustelle</Label>
+                    <Select
+                      id="construction_site_id"
+                      name="construction_site_id"
+                      value={formData.construction_site_id}
+                      onChange={handleInputChange}
+                    >
+                      <option value="">Keine Baustelle</option>
+                      {constructionSites.map(site => (
+                        <option key={site.id} value={site.id}>
+                          {site.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
 
-              <div className="pt-4">
-                <Button
-                  type="submit"
-                  disabled={isSaving}
-                  className="w-full"
-                >
-                  <SaveIcon size={16} className="mr-1" /> {isSaving ? 'Speichern...' : 'Speichern'}
-                </Button>
-              </div>
-            </form>
-          ) : (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <h3 className="font-medium">Details</h3>
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div className="font-medium">Typ:</div>
-                  <div>{wagon.wagon_types?.name || '-'}</div>
-                  
-                  <div className="font-medium">Nummer:</div>
-                  <div>{wagon.number || '-'}</div>
-                  
-                  <div className="font-medium">Länge:</div>
-                  <div>{wagon.length} m</div>
+                  <div>
+                    <Label htmlFor="content">Inhalt/Beschreibung</Label>
+                    <Textarea
+                      id="content"
+                      name="content"
+                      value={formData.content}
+                      onChange={handleInputChange}
+                      placeholder="Beschreibung des Waggons oder Inhalts"
+                      rows={3}
+                    />
+                  </div>
 
-                  <div className="font-medium">Inhalt:</div>
-                  <div>{wagon.content || '-'}</div>
-
-                  <div className="font-medium">Baustelle:</div>
-                  <div>{wagon.construction_site?.name || '-'}</div>
+                  <Button
+                    className="w-full mt-4"
+                    onClick={handleSave}
+                    disabled={isSaving}
+                  >
+                    {isSaving ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent mr-2"></div>
+                        Speichern...
+                      </>
+                    ) : (
+                      <>
+                        <SaveIcon size={16} className="mr-1" /> Änderungen speichern
+                      </>
+                    )}
+                  </Button>
                 </div>
-              </div>
+              ) : (
+                // Read-only view
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-500">Typ</h4>
+                      <p>{wagon.wagon_types?.name || 'Nicht angegeben'}</p>
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-500">Nummer</h4>
+                      <p>{wagon.number || 'Nicht angegeben'}</p>
+                    </div>
+                  </div>
 
-              {/* Show recent trip history for this wagon */}
-              <div className="space-y-2">
-                <h3 className="font-medium">Aktuelle Position</h3>
-                <div className="text-sm">
-                  {wagon.track_id ? (
-                    <div>Auf Gleis: {/* Need to fetch track & node name */}</div>
-                  ) : (
-                    <div className="text-gray-500">Aktuell nicht auf einem Gleis</div>
-                  )}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-500">Länge</h4>
+                      <p>{wagon.length} m</p>
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-500">Baustelle</h4>
+                      <p>{wagon.construction_site?.[0]?.name || 'Keine Baustelle zugewiesen'}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-500">Aktueller Standort</h4>
+                    <p>{wagon.current_track_id ? 'Auf Gleis' : 'Nicht auf einem Gleis'}</p>
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-500">Inhalt/Beschreibung</h4>
+                    <p className="whitespace-pre-wrap">{wagon.content || 'Keine Beschreibung vorhanden'}</p>
+                  </div>
                 </div>
-              </div>
-            </div>
-          )}
+              )}
+            </TabsContent>
+
+            <TabsContent value="trajectory">
+              <WagonTrajectory wagonId={wagon.id} wagon={wagon} />
+            </TabsContent>
+          </Tabs>
         </div>
       ) : (
         <div className="p-4 text-center text-gray-500">

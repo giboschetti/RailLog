@@ -1,0 +1,4 @@
+git status
+git add .
+git commit -m "TYPE HERE WHAT WERE THE CHANGES"
+git push origin master
