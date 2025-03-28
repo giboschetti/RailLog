@@ -9,6 +9,9 @@ import ConfirmDialog from '@/components/ui/confirm-dialog';
 import InternalTripWagonSelector from './InternalTripWagonSelector';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { validateDelivery } from '@/lib/tripValidation';
+import { ValidationWarning } from '@/lib/tripValidation';
+import ValidationWarnings from './ValidationWarnings';
 
 interface TripModalProps {
   isOpen: boolean;
@@ -57,6 +60,9 @@ const TripModal: React.FC<TripModalProps> = ({
   const [capacityDetails, setCapacityDetails] = useState<any>(null);
   const [restrictionsDetails, setRestrictionsDetails] = useState<any>(null);
   const [validated, setValidated] = useState(false);
+
+  // Add state for warnings
+  const [validationWarnings, setValidationWarnings] = useState<ValidationWarning[]>([]);
 
   // Helper function to format date for input field
   const formatDateForInput = (dateString?: string) => {
@@ -312,8 +318,32 @@ const TripModal: React.FC<TripModalProps> = ({
         throw new Error('Bitte wählen Sie mindestens einen Waggon aus.');
       }
       
-      // Run validation before proceeding
-      if (!skipValidationCheck) {
+      // For deliveries, validate using the new validation function
+      if (type === 'delivery' && !skipValidationCheck) {
+        const validationResult = await validateDelivery({
+          projectId: project.id,
+          dateTime,
+          destTrackId,
+          wagonGroups,
+          transportPlanNumber,
+          isPlanned
+        });
+        
+        // If validation failed with errors, show the first error
+        if (!validationResult.isValid && validationResult.errors.length > 0) {
+          throw new Error(validationResult.errors[0].message);
+        }
+        
+        // If there are warnings, store them for the ValidationWarnings component
+        if (validationResult.warnings.length > 0) {
+          setValidationWarnings(validationResult.warnings);
+          setShowConfirmDialog(true);
+          setLoading(false);
+          return;
+        }
+      }
+      // For other trip types or if skipValidationCheck is true, run the old validation logic
+      else if (!skipValidationCheck) {
         const isValid = await validateTrip();
         if (!isValid) {
           // Validation failed - let the user see the confirmation dialog
@@ -941,135 +971,73 @@ const TripModal: React.FC<TripModalProps> = ({
       </div>
 
       {/* Confirmation dialog for capacity/restriction issues */}
-      {showConfirmDialog && (
+      {showConfirmDialog && validationWarnings.length > 0 ? (
+        <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+          <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+            <ValidationWarnings 
+              warnings={validationWarnings}
+              onProceedAnyway={() => {
+                setValidated(true);
+                handleConfirmCapacityIssue();
+              }}
+              onCancel={() => setShowConfirmDialog(false)}
+            />
+          </DialogContent>
+        </Dialog>
+      ) : showConfirmDialog && (
         <ConfirmDialog
           open={showConfirmDialog}
           onOpenChange={setShowConfirmDialog}
           title={
             hasCapacityIssue 
-              ? "Gleiskapazität überschritten"
+              ? "Kapazitätsproblem" 
               : hasRestrictions 
-                ? "Einschränkungen gefunden" 
-                : "Bestätigung erforderlich"
+                ? "Gleisrestriktionen" 
+                : "Hinweis"
           }
           description={
-            hasCapacityIssue 
-              ? <ConfirmationContent capacityDetails={capacityDetails} />
-              : hasRestrictions && restrictionsDetails
-                ? <RestrictionConfirmationContent restrictionsDetails={restrictionsDetails} />
-                : "Bitte bestätigen Sie die Aktion."
+            <>
+              {hasCapacityIssue && (
+                <div className="mb-4">
+                  <p className="text-sm text-red-600 mb-2">
+                    Das Zielgleis hat nicht ausreichend Kapazität für diese Waggons.
+                  </p>
+                  {capacityDetails && (
+                    <div className="bg-gray-100 p-3 rounded-md text-xs">
+                      <p>Gleiskapazität: {capacityDetails.track.useful_length}m</p>
+                      <p>Aktuelle Belegung: {capacityDetails.current_usage}m</p>
+                      <p>Zusätzlich benötigt: {capacityDetails.additional_length}m</p>
+                      <p>Nach der Buchung: {capacityDetails.total_after}m</p>
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              {hasRestrictions && (
+                <div className="mb-4">
+                  <p className="text-sm text-red-600 mb-2">
+                    Es gibt aktive Restriktionen für dieses Gleis zum gewählten Zeitpunkt.
+                  </p>
+                  {restrictionsDetails && restrictionsDetails.restrictions.map((r: any, i: number) => (
+                    <div key={i} className="bg-gray-100 p-3 rounded-md text-xs mb-2">
+                      <p>Typ: {r.restriction_type === 'no_entry' ? 'Keine Einfahrt' : 'Keine Ausfahrt'}</p>
+                      <p>Betroffenes Gleis: {r.affected_track_id}</p>
+                      <p>Grund: {r.grund || 'Nicht angegeben'}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              <p className="text-sm">
+                Möchten Sie trotz der Probleme fortfahren? Diese Fahrt wird als "problematisch" markiert.
+              </p>
+            </>
           }
+          onConfirm={hasCapacityIssue ? handleConfirmCapacityIssue : handleConfirmRestrictions}
           confirmText="Trotzdem fortfahren"
-          cancelText="Abbrechen"
-          onConfirm={() => {
-            setValidated(true); // Set validated to true
-            if (hasCapacityIssue) {
-              handleConfirmCapacityIssue();
-            } else if (hasRestrictions) {
-              handleConfirmRestrictions();
-            } else {
-              setShowConfirmDialog(false);
-            }
-          }}
-          onCancel={() => {
-            setShowConfirmDialog(false);
-            setLoading(false);
-          }}
           variant="warning"
         />
       )}
-    </div>
-  );
-};
-
-// Confirmation dialog content component
-const ConfirmationContent = ({ 
-  capacityDetails 
-}: { 
-  capacityDetails: any
-}) => {
-  return (
-    <div className="space-y-4 text-sm">
-      {capacityDetails && !capacityDetails.hasCapacity && (
-        <div className="space-y-2">
-          <h4 className="font-semibold text-red-800">Gleis-Kapazitätsproblem:</h4>
-          <p>
-            Das Zielgleis hat nicht genügend Kapazität für diese Waggons.
-          </p>
-          <ul className="list-disc pl-5 space-y-1">
-            <li>Verfügbare Länge: {capacityDetails.trackLength || 0} Meter</li>
-            <li>Aktuelle Belegung: {capacityDetails.currentUsage || 0} Meter</li>
-            <li>Neue Waggons: {capacityDetails.additionalLength || 0} Meter</li>
-            <li>Fehlende Kapazität: {Math.abs(capacityDetails.availableSpace || 0)} Meter</li>
-            {capacityDetails.occupancyPercentage !== undefined && (
-              <li>Aktuelle Auslastung: {Math.round(capacityDetails.occupancyPercentage)}%</li>
-            )}
-            {capacityDetails.wagonCount !== undefined && (
-              <li>Anzahl der Waggons auf dem Gleis: {capacityDetails.wagonCount}</li>
-            )}
-          </ul>
-        </div>
-      )}
-
-      <p className="font-medium">
-        Möchten Sie die Fahrt trotz Kapazitätsproblemen erstellen?
-      </p>
-    </div>
-  );
-};
-
-// Add this new component after the ConfirmationContent component
-const RestrictionConfirmationContent = ({ 
-  restrictionsDetails 
-}: { 
-  restrictionsDetails: any
-}) => {
-  return (
-    <div className="space-y-4">
-      <div className="text-yellow-800 bg-yellow-50 p-4 rounded-md">
-        <div className="flex items-start">
-          <div className="flex-shrink-0">
-            <svg className="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-            </svg>
-          </div>
-          <div className="ml-3">
-            <h3 className="text-sm font-medium">Achtung: Diese Fahrt verstößt gegen aktive Einschränkungen</h3>
-            <div className="mt-2 text-sm">
-              <p>
-                Es wurden {restrictionsDetails.restrictions.length} aktive Einschränkungen gefunden,
-                die mit dieser Fahrt in Konflikt stehen:
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="space-y-3 max-h-60 overflow-y-auto p-2">
-        {restrictionsDetails.restrictions.map((restriction: any, index: number) => (
-          <div key={index} className="border border-yellow-200 bg-yellow-50 p-3 rounded-md">
-            <p className="font-medium">
-              {restriction.restriction_type === 'no_entry' ? 'Keine Einfahrt möglich' : 'Keine Ausfahrt möglich'}
-              {restriction.node_level ? ' (Knotenpunkt-Ebene)' : ' (Gleis-Ebene)'}
-            </p>
-            <p className="text-sm">
-              <span className="font-medium">Zeitraum:</span> {new Date(restriction.from_datetime).toLocaleString()} bis {new Date(restriction.to_datetime).toLocaleString()}
-            </p>
-            {restriction.comment && (
-              <p className="text-sm mt-1">
-                <span className="font-medium">Kommentar:</span> {restriction.comment}
-              </p>
-            )}
-          </div>
-        ))}
-      </div>
-
-      <div className="pt-2 border-t border-gray-200">
-        <p className="text-sm text-gray-500">
-          Sie sollten erwägen, diese Fahrt für einen anderen Zeitpunkt oder eine andere Strecke zu planen.
-          Das Fortfahren könnte zu betrieblichen Problemen führen.
-        </p>
-      </div>
     </div>
   );
 };

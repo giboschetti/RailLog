@@ -298,17 +298,6 @@ export async function checkTripRestrictionsSimplified(
     const dateString = tripDate.toISOString().split('T')[0]; // YYYY-MM-DD
     const timeString = tripDate.toTimeString().substring(0, 8); // HH:MM:SS
     
-    console.log(`
-    ========================================================================
-    CHECKING TRIP RESTRICTIONS (SIMPLIFIED):
-    - Trip type: ${tripType}
-    - Date: ${dateString}
-    - Time: ${timeString}
-    - Source track ID: ${sourceTrackId || 'N/A'}
-    - Destination track ID: ${destTrackId || 'N/A'}
-    ========================================================================
-    `);
-    
     let restrictions: any[] = [];
     
     // Check for entry restrictions (deliveries and internal trips)
@@ -317,21 +306,34 @@ export async function checkTripRestrictionsSimplified(
       const { data: entryRestrictions, error: entryError } = await supabase
         .from('daily_restrictions')
         .select('*')
-        .eq('restriction_date', dateString)
         .eq('type', 'no_entry')
-        .contains('betroffene_gleise', [destTrackId])
-        .lte('time_from', timeString)
-        .gte('time_to', timeString);
+        .contains('betroffene_gleise', [destTrackId]);
       
       if (entryError) {
         console.error('Error fetching entry restrictions:', entryError);
       } else if (entryRestrictions && entryRestrictions.length > 0) {
-        console.log(`Found ${entryRestrictions.length} entry restrictions for dest track ${destTrackId}`);
-        restrictions = restrictions.concat(entryRestrictions.map(r => ({
-          ...r,
-          restriction_type: 'no_entry',
-          affected_track_id: destTrackId
-        })));
+        // Filter restrictions by date
+        const activeRestrictions = entryRestrictions.filter(r => {
+          const restrictionDate = r.restriction_date ? new Date(r.restriction_date) : null;
+          
+          // Check if the restriction date matches (null means it applies to all dates)
+          if (!restrictionDate) {
+            return true; // Applies to all dates
+          }
+          
+          // Compare just the dates (ignore time)
+          const restrictionDateStr = restrictionDate.toISOString().split('T')[0];
+          return restrictionDateStr === dateString;
+        });
+        
+        if (activeRestrictions.length > 0) {
+          restrictions = restrictions.concat(activeRestrictions.map(r => ({
+            ...r,
+            restriction_type: 'no_entry',
+            affected_track_id: destTrackId,
+            comment: r.comment || null
+          })));
+        }
       }
     }
     
@@ -341,41 +343,43 @@ export async function checkTripRestrictionsSimplified(
       const { data: exitRestrictions, error: exitError } = await supabase
         .from('daily_restrictions')
         .select('*')
-        .eq('restriction_date', dateString)
         .eq('type', 'no_exit')
-        .contains('betroffene_gleise', [sourceTrackId])
-        .lte('time_from', timeString)
-        .gte('time_to', timeString);
+        .contains('betroffene_gleise', [sourceTrackId]);
       
       if (exitError) {
         console.error('Error fetching exit restrictions:', exitError);
       } else if (exitRestrictions && exitRestrictions.length > 0) {
-        console.log(`Found ${exitRestrictions.length} exit restrictions for source track ${sourceTrackId}`);
-        restrictions = restrictions.concat(exitRestrictions.map(r => ({
-          ...r,
-          restriction_type: 'no_exit',
-          affected_track_id: sourceTrackId
-        })));
+        // Filter restrictions by date
+        const activeRestrictions = exitRestrictions.filter(r => {
+          const restrictionDate = r.restriction_date ? new Date(r.restriction_date) : null;
+          
+          // Check if the restriction date matches (null means it applies to all dates)
+          if (!restrictionDate) {
+            return true; // Applies to all dates
+          }
+          
+          // Compare just the dates (ignore time)
+          const restrictionDateStr = restrictionDate.toISOString().split('T')[0];
+          return restrictionDateStr === dateString;
+        });
+        
+        if (activeRestrictions.length > 0) {
+          restrictions = restrictions.concat(activeRestrictions.map(r => ({
+            ...r,
+            restriction_type: 'no_exit',
+            affected_track_id: sourceTrackId,
+            comment: r.comment || null
+          })));
+        }
       }
     }
-    
-    console.log(`
-    ========================================================================
-    RESTRICTION CHECK RESULTS (SIMPLIFIED):
-    - Trip type: ${tripType}
-    - Date/time: ${datetime} (${new Date(datetime).toLocaleString()})
-    - Source track: ${sourceTrackId || 'N/A'}
-    - Destination track: ${destTrackId || 'N/A'}
-    - Found ${restrictions.length} active restrictions
-    ========================================================================
-    `);
     
     return {
       hasRestrictions: restrictions.length > 0,
       restrictions
     };
   } catch (error) {
-    console.error('Error checking trip restrictions (simplified):', error);
+    console.error('Error checking trip restrictions:', error);
     return {
       hasRestrictions: false,
       restrictions: [],
@@ -868,4 +872,112 @@ export async function expandRestriction(
       error
     };
   }
+}
+
+/**
+ * Format restriction time and date for display in UI
+ * @param restriction The restriction object from the database
+ * @returns A formatted string to display in the UI
+ */
+export function formatRestrictionForDisplay(restriction: any): {
+  type: string;
+  grund: string;
+  fromTime: string;
+  toTime: string;
+  dateRange: string;
+  fromDateTime: string;
+  toDateTime: string;
+} {
+  if (!restriction) {
+    return {
+      type: 'Unbekannt',
+      grund: 'Nicht angegeben',
+      fromTime: '',
+      toTime: '',
+      dateRange: '',
+      fromDateTime: '',
+      toDateTime: ''
+    };
+  }
+  
+  // Format the restriction type
+  const type = restriction.restriction_type || restriction.type || 'Unbekannt';
+  const displayType = type === 'no_entry' ? 'Keine Einfahrt' : type === 'no_exit' ? 'Keine Ausfahrt' : type;
+  
+  // Get the comment/grund
+  const grund = restriction.comment || 'Nicht angegeben';
+  
+  // Format date/time fields (handle both new and old formats)
+  let fromDateTime = '';
+  let toDateTime = '';
+  let fromTime = '';
+  let toTime = '';
+  let dateRange = '';
+  
+  // If we have start_datetime/end_datetime from the original restriction
+  if (restriction.start_datetime || restriction.from_datetime) {
+    const startDate = new Date(restriction.start_datetime || restriction.from_datetime);
+    fromDateTime = startDate.toLocaleDateString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    }) + ' ' + startDate.toLocaleTimeString('de-DE', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+  
+  if (restriction.end_datetime || restriction.to_datetime) {
+    const endDate = new Date(restriction.end_datetime || restriction.to_datetime);
+    toDateTime = endDate.toLocaleDateString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    }) + ' ' + endDate.toLocaleTimeString('de-DE', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+  
+  // Format the time range for daily_restrictions format
+  if (restriction.time_from) {
+    const formatTimeString = (timeStr: string) => {
+      if (!timeStr) return '';
+      
+      // Extract just the hour:minute part
+      if (timeStr.includes(':')) {
+        const parts = timeStr.split(':');
+        return `${parts[0]}:${parts[1]}`;
+      }
+      
+      return timeStr;
+    };
+
+    fromTime = formatTimeString(restriction.time_from) || '00:00';
+    toTime = formatTimeString(restriction.time_to) || '23:59';
+  }
+  
+  // Format the date range for daily_restrictions format
+  if (restriction.restriction_date) {
+    try {
+      const date = new Date(restriction.restriction_date);
+      dateRange = date.toLocaleDateString('de-DE', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric'
+      });
+    } catch (e) {
+      dateRange = restriction.restriction_date;
+    }
+  }
+  
+  return {
+    type: displayType,
+    grund,
+    fromTime,
+    toTime,
+    dateRange,
+    fromDateTime,
+    toDateTime
+  };
 } 
