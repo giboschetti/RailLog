@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import TimelineTrack from './TimelineTrack';
 import DailyTrips from './DailyTrips';
-import { formatDate, getStartOfDay, getEndOfDay } from '@/lib/utils';
+import HourSlider from './HourSlider';
+import { formatDate, getStartOfDay, getEndOfDay, formatDateTime } from '@/lib/utils';
 import TripDrawer from '../projects/trips/TripDrawer';
 import WagonDrawer from '../projects/wagons/WagonDrawer';
 
@@ -34,11 +35,13 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
 }) => {
   const router = useRouter();
   const [date, setDate] = useState(initialDate);
+  const [selectedHour, setSelectedHour] = useState(0); // Default to midnight
   const [nodes, setNodes] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSliderDragging, setIsSliderDragging] = useState(false);
   const [project, setProject] = useState<any>(null);
+  const [tripsForDay, setTripsForDay] = useState<any[]>([]);
   
   // State for selected trip and wagon
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
@@ -67,46 +70,117 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     )
   );
 
-  // Fetch project data for date range
+  // Get selected datetime with hour precision
+  const getSelectedDateTime = () => {
+    const selectedDate = new Date(date);
+    selectedDate.setHours(selectedHour, 0, 0, 0);
+    return selectedDate.toISOString();
+  };
+
+  // Function to generate hour markers for the timeline
+  const generateHourMarkers = () => {
+    if (!date) return null;
+    
+    const markers = [];
+    const startOfDay = new Date(date);
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    const endOfDay = new Date(date);
+    endOfDay.setHours(23, 59, 59, 999);
+    
+    // Calculate the width of one day
+    const totalMs = endOfDay.getTime() - startOfDay.getTime();
+    
+    // Add a marker every 6 hours (4 markers for a day)
+    for (let hour = 6; hour < 24; hour += 6) {
+      const time = new Date(date);
+      time.setHours(hour, 0, 0, 0);
+      
+      // Calculate the position as a percentage of the total width
+      const elapsedMs = time.getTime() - startOfDay.getTime();
+      const position = (elapsedMs / totalMs) * 100;
+      
+      markers.push(
+        <div 
+          key={`hour-${hour}`}
+          className="absolute h-full border-l border-gray-300 z-0"
+          style={{ left: `${position}%` }}
+        >
+          <span className="absolute -top-5 -translate-x-1/2 text-xs text-gray-500 bg-white px-0.5 font-medium">
+            {hour}:00
+          </span>
+        </div>
+      );
+    }
+    
+    return markers;
+  };
+
+  // Function to generate week markers for the timeline
+  const generateWeekMarkers = () => {
+    if (!startDate || !endDate) return null;
+    
+    const oneDay = 24 * 60 * 60 * 1000; // milliseconds in a day
+    const totalDays = Math.ceil((endDate.getTime() - startDate.getTime()) / oneDay);
+    const weekMarkers = [];
+    
+    // Calculate the number of weeks to show based on total days
+    const totalWeeks = Math.floor(totalDays / 7);
+    
+    // Only show markers if we have reasonable space
+    const weeksToShow = Math.min(totalWeeks, 15); // Limit to 15 markers maximum
+    const weekInterval = Math.max(1, Math.floor(totalWeeks / weeksToShow));
+    
+    // Get ISO week number for a date
+    const getWeekNumber = (d: Date) => {
+      // Copy date to avoid modifying the original
+      d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      // Set to nearest Thursday (makes the week calculation ISO-compliant)
+      d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      // Calculate full weeks between yearStart and date
+      const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+      return weekNo;
+    };
+    
+    // Create a marker every X weeks
+    for (let i = 7; i < totalDays; i += 7 * weekInterval) {
+      const position = (i / totalDays) * 100;
+      const markerDate = new Date(startDate.getTime() + (i * oneDay));
+      const weekNumber = getWeekNumber(markerDate);
+      
+      weekMarkers.push(
+        <div 
+          key={i}
+          className="absolute h-full border-l border-gray-300 z-0 flex flex-col items-center"
+          style={{ left: `${position}%` }}
+        >
+          <span className="text-xs text-gray-500 bg-white px-1 rounded-sm">
+            KW{weekNumber}
+          </span>
+        </div>
+      );
+    }
+    
+    return weekMarkers;
+  };
+
+  // Fetch project data
   useEffect(() => {
-    const fetchProjectData = async () => {
-      try {
-        const { data, error } = await supabase
-          .from('projects')
-          .select('*')
-          .eq('id', projectId)
-          .single();
-
-        if (error) {
-          console.error('Error fetching project:', error);
-          return;
-        }
-
+    const fetchProject = async () => {
+      const { data, error } = await supabase
+        .from('projects')
+        .select('*')
+        .eq('id', projectId)
+        .single();
+      
+      if (!error && data) {
         setProject(data);
-        
-        // If project has a start date, use it as the initial date
-        if (data.start_date) {
-          // Only update date if not already set manually
-          if (date === initialDate) {
-            const today = new Date();
-            const projectStart = new Date(data.start_date);
-            const projectEnd = data.end_date ? new Date(data.end_date) : null;
-            
-            // If today is within the project dates, use today, otherwise use project start
-            if (projectEnd && (today < projectStart || today > projectEnd)) {
-              setDate(projectStart.toISOString());
-            } else if (!projectEnd && today < projectStart) {
-              setDate(projectStart.toISOString());
-            }
-          }
-        }
-      } catch (err) {
-        console.error('Exception fetching project data:', err);
       }
     };
-
-    fetchProjectData();
-  }, [projectId, initialDate, date]);
+    
+    fetchProject();
+  }, [projectId]);
 
   // Fetch nodes and tracks for this project
   const fetchNodesAndTracks = async () => {
@@ -142,6 +216,35 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     }
   };
 
+  // Fetch trips for the selected day (for hour markers)
+  const fetchTripsForDay = async () => {
+    try {
+      const selectedDate = new Date(date);
+      const startOfDay = new Date(selectedDate);
+      startOfDay.setHours(0, 0, 0, 0);
+      
+      const endOfDay = new Date(selectedDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      const { data, error } = await supabase
+        .from('trips')
+        .select('id, datetime, type')
+        .eq('project_id', projectId)
+        .gte('datetime', startOfDay.toISOString())
+        .lte('datetime', endOfDay.toISOString())
+        .order('datetime', { ascending: true });
+      
+      if (error) {
+        console.error('Error fetching trips for day:', error);
+        return;
+      }
+      
+      setTripsForDay(data || []);
+    } catch (err) {
+      console.error('Exception fetching trips for day:', err);
+    }
+  };
+
   useEffect(() => {
     fetchNodesAndTracks();
   }, [projectId]);
@@ -153,13 +256,15 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     }
   }, [refreshKey]);
 
-  // Update the date change handler to call the onDateChange callback
+  // Fetch trips when date changes
   useEffect(() => {
+    fetchTripsForDay();
+    
     // When date changes, notify parent component
     if (onDateChange) {
       onDateChange(date);
     }
-  }, [date, onDateChange]);
+  }, [date, projectId, onDateChange]);
 
   // Navigate to previous/next day
   const goToPreviousDay = () => {
@@ -223,6 +328,7 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
   // Handle refresh after updates
   const handleRefresh = () => {
     fetchNodesAndTracks();
+    fetchTripsForDay();
   };
 
   const handleTripDrawerClose = () => {
@@ -230,6 +336,7 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     setSelectedTripId(null);
     // Refresh data when trip drawer is closed (in case changes were made)
     fetchNodesAndTracks();
+    fetchTripsForDay();
   };
 
   const handleWagonDrawerClose = () => {
@@ -243,51 +350,8 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
   const formatDateWithDay = (dateString: string) => {
     const date = new Date(dateString);
     const days = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
-    const dayOfWeek = days[date.getDay()];
-    const formattedDate = formatDate(date);
-    return `${dayOfWeek}, ${formattedDate}`;
-  };
-
-  // Get ISO week number
-  const getWeekNumber = (d: Date) => {
-    // Copy date to avoid modifying the original
-    d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-    // Set to nearest Thursday (makes the week calculation ISO-compliant)
-    d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-    // Calculate full weeks between yearStart and date
-    const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
-    return weekNo;
-  };
-
-  // Generate week markers for the timeline
-  const generateWeekMarkers = () => {
-    const segments = 10;
-    const markers = [];
-    
-    for (let i = 0; i <= segments; i++) {
-      const position = (i / segments) * 100;
-      const segmentDate = new Date(
-        startDate.getTime() + (endDate.getTime() - startDate.getTime()) * (position / 100)
-      );
-      
-      const weekNumber = getWeekNumber(segmentDate);
-      
-      markers.push(
-        <div 
-          key={i} 
-          className="absolute h-full"
-          style={{ left: `${position}%` }}
-        >
-          <div className="h-full w-px bg-gray-200"></div>
-          <div className="absolute -top-5 -translate-x-1/2 text-xs text-gray-500 font-bold">
-            {i > 0 && i < segments ? `KW${weekNumber}` : ''}
-          </div>
-        </div>
-      );
-    }
-    
-    return markers;
+    const dayName = days[date.getDay()];
+    return `${dayName}, ${formatDate(date)}`;
   };
 
   if (loading) {
@@ -342,17 +406,19 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
         </div>
 
         {/* Timeline Slider */}
-        <div className="relative w-full h-24 bg-white rounded-lg shadow-sm border border-gray-200 px-12 pt-7 pb-3 flex items-center">
+        <div className="relative h-24 px-12">
           {/* Start and end date display */}
           <div className="flex justify-between w-full text-xs text-gray-500 absolute top-3 inset-x-12">
-            <span className="font-bold">{formatDate(startDate)}</span>
-            <span className="font-bold">{formatDate(endDate)}</span>
+            <span className="font-bold bg-white px-1 py-0.5 rounded -ml-2">{formatDate(startDate)}</span>
+            <span className="font-bold bg-white px-1 py-0.5 rounded -mr-2">{formatDate(endDate)}</span>
           </div>
           
           {/* Week markers */}
           <div className="absolute inset-x-12 top-10 bottom-7 z-0">
             {generateWeekMarkers()}
           </div>
+          
+          {/* Hour markers - Removed from this section */}
           
           {/* Slider input */}
           <input
@@ -380,60 +446,71 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
             </div>
           )}
         </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6 mt-6">
-        {/* Left side: Track visualization */}
-        <div className="md:col-span-2 lg:col-span-3 bg-white rounded-lg border border-gray-200 p-4 overflow-auto max-h-[70vh]">
-          <h2 className="text-xl font-bold mb-4">Gleisbelegung</h2>
-          
-          {nodes.length === 0 ? (
-            <div className="p-4 bg-gray-50 rounded text-center">
-              <p className="text-gray-500">Keine Logistikknoten gefunden</p>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              {nodes.map(node => (
-                <div key={node.id} className="space-y-2">
-                  <h3 className="font-semibold text-lg">{node.name}</h3>
-                  
-                  {node.tracks && node.tracks.length > 0 ? (
-                    <div className="space-y-4">
-                      {node.tracks.map((track: any) => (
-                        <TimelineTrack
-                          key={track.id}
-                          nodeName={node.name}
-                          track={track}
-                          date={date}
-                          onWagonSelect={handleWagonSelect}
-                          onRefresh={handleRefresh}
-                          projectId={projectId}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="p-2 bg-gray-50 rounded text-center">
-                      <p className="text-gray-500">Keine Gleise für diesen Knoten</p>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
         
-        {/* Right side: Daily trips */}
-        <div className="md:col-span-1 bg-white rounded-lg border border-gray-200">
-          <DailyTrips 
-            date={date} 
-            onTripSelect={handleTripSelect}
-            projectId={projectId}
+        {/* Hour Slider */}
+        <div className="mt-2 px-12">
+          <div className="flex items-center mb-1">
+            <h2 className="text-sm font-medium text-gray-700">Tageszeit</h2>
+            <div className="ml-auto text-sm bg-gray-50 px-2 py-1 rounded-md border border-gray-200 flex items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span className="font-medium text-gray-700">{formatDateTime(getSelectedDateTime())}</span>
+            </div>
+          </div>
+          <HourSlider 
+            value={selectedHour}
+            onChange={setSelectedHour}
+            tripsForDay={tripsForDay}
           />
         </div>
       </div>
 
-      {/* Trip and Wagon Drawers */}
-      {selectedTripId && isTripDrawerOpen && project && (
+      {/* Track Visualization */}
+      <div className="mb-8">
+        <h2 className="text-lg font-bold mb-4">Gleisbelegung</h2>
+        
+        <div className="space-y-8">
+          {nodes.map(node => (
+            <div key={node.id} className="mb-8">
+              <h3 className="text-md font-semibold mb-3">{node.name}</h3>
+              
+              {node.tracks && node.tracks.length > 0 ? (
+                <div className="space-y-4">
+                  {node.tracks.map((track: any) => (
+                    <TimelineTrack
+                      key={track.id}
+                      track={track}
+                      nodeName={node.name}
+                      date={getSelectedDateTime()}
+                      onWagonSelect={handleWagonSelect}
+                      onRefresh={handleRefresh}
+                      projectId={projectId}
+                      selectedDateTime={new Date(getSelectedDateTime())}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="p-4 bg-gray-50 rounded text-gray-500 text-center">
+                  Keine Gleise für diesen Knoten definiert.
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Daily Trips */}
+      <div className="mb-8">
+        <DailyTrips 
+          date={date} 
+          onTripSelect={handleTripSelect}
+          projectId={projectId}
+        />
+      </div>
+
+      {/* Trip Drawer */}
+      {isTripDrawerOpen && selectedTripId && (
         <TripDrawer
           tripId={selectedTripId}
           isOpen={isTripDrawerOpen}
@@ -442,8 +519,9 @@ const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
           project={project}
         />
       )}
-      
-      {selectedWagonId && isWagonDrawerOpen && (
+
+      {/* Wagon Drawer */}
+      {isWagonDrawerOpen && selectedWagonId && (
         <WagonDrawer
           wagonId={selectedWagonId}
           isOpen={isWagonDrawerOpen}

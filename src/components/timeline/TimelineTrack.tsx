@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { getEnhancedTrackOccupancy, TrackWithOccupancy, WagonOnTrack } from '@/lib/trackUtils';
 import { supabase } from '@/lib/supabase';
 import { Node } from '@/lib/supabase';
 import { toast } from '@/components/ui/use-toast';
+import { formatDateTime } from '@/lib/utils';
 
 // Define a utility function to generate colors based on construction site ID
 const getColorForConstructionSite = (siteId: string | undefined): string => {
@@ -16,9 +17,6 @@ const getColorForConstructionSite = (siteId: string | undefined): string => {
   for (let i = 0; i < siteId.length; i++) {
     hash = siteId.charCodeAt(i) + ((hash << 5) - hash);
   }
-  
-  // Convert to color - using hsl to get vibrant colors
-  const hue = hash % 360;
   
   // Predefined set of colors for better visual distinction
   const colors = [
@@ -43,10 +41,11 @@ interface TimelineTrackProps {
     useful_length: number;
   };
   nodeName: string;
-  date: string;
+  date: string; // ISO date string with time information
   onWagonSelect?: (wagonId: string) => void;
   onRefresh?: () => void;
   projectId: string;
+  selectedDateTime?: Date;  // Add this new prop for the selected time
 }
 
 const TimelineTrack: React.FC<TimelineTrackProps> = ({ 
@@ -55,7 +54,8 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
   date, 
   onWagonSelect,
   onRefresh,
-  projectId
+  projectId,
+  selectedDateTime,
 }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +64,22 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
   const [constructionSites, setConstructionSites] = useState<{[key: string]: Node}>({});
   const [isDragOver, setIsDragOver] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isHovering, setIsHovering] = useState(false);
+
+  // Calculate start and end dates for the current day
+  const startDate = useMemo(() => {
+    if (!date) return null;
+    const dateObj = new Date(date);
+    dateObj.setHours(0, 0, 0, 0);
+    return dateObj;
+  }, [date]);
+
+  const endDate = useMemo(() => {
+    if (!date) return null;
+    const dateObj = new Date(date);
+    dateObj.setHours(23, 59, 59, 999);
+    return dateObj;
+  }, [date]);
 
   // Fetch construction sites to display their names in tooltips
   useEffect(() => {
@@ -95,14 +111,12 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
     const fetchTrackOccupancy = async () => {
       setLoading(true);
       try {
-        // Use end of day (23:59:59) for visualization to show the result of all actions on that day
-        const selectedDate = new Date(date);
-        const endOfDay = new Date(selectedDate);
-        endOfDay.setHours(23, 59, 59, 999);
-        const endOfDayISO = endOfDay.toISOString();
+        // The date parameter now contains the full datetime with hour precision
+        // (The old version used end of day for all visualizations)
+        const selectedDateTime = new Date(date).toISOString();
         
-        console.log(`Fetching track occupancy for ${track.id} at end of day: ${endOfDayISO}`);
-        const result = await getEnhancedTrackOccupancy(track.id, endOfDayISO);
+        console.log(`Fetching track occupancy for ${track.id} at specific time: ${selectedDateTime}`);
+        const result = await getEnhancedTrackOccupancy(track.id, selectedDateTime);
         if (result.success && result.trackData) {
           setTrackData(result.trackData);
           setWagons(result.wagons);
@@ -169,26 +183,27 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
       
       setIsSubmitting(true);
       
-      // Get the base date without time for checking restrictions across the day
-      const selectedDate = new Date(date);
+      // Get the date part from the ISO string for restriction checking
+      const selectedDateTime = new Date(date);
+      
       // Create times to check throughout the day
       const timeCheckPoints = [
-        new Date(selectedDate.setHours(0, 1, 0, 0)), // Start of day
-        new Date(selectedDate.setHours(8, 0, 0, 0)), // Morning
-        new Date(selectedDate.setHours(12, 0, 0, 0)), // Noon
-        new Date(selectedDate.setHours(17, 0, 0, 0)), // Evening
-        new Date(selectedDate.setHours(23, 59, 0, 0))  // End of day
+        new Date(selectedDateTime),                    // Current selected time
+        new Date(selectedDateTime.setHours(0, 1, 0, 0)), // Start of day
+        new Date(selectedDateTime.setHours(8, 0, 0, 0)), // Morning
+        new Date(selectedDateTime.setHours(12, 0, 0, 0)), // Noon
+        new Date(selectedDateTime.setHours(17, 0, 0, 0)), // Evening
+        new Date(selectedDateTime.setHours(23, 59, 0, 0))  // End of day
       ];
       
-      // Use noon for the actual trip time
+      // Use the current selected time for the actual trip time
       const tripDateTime = new Date(date);
-      tripDateTime.setHours(12, 0, 0, 0);
       const tripDateTimeISO = tripDateTime.toISOString();
       
       // Check for restrictions at each time point throughout the day
       const { checkTripRestrictions } = await import('@/lib/trackUtils');
       
-      console.log(`Checking restrictions for wagon movement from track ${sourceTrackId} to track ${track.id} on ${date}`);
+      console.log(`Checking restrictions for wagon movement from track ${sourceTrackId} to track ${track.id} on ${formatDateTime(date)}`);
       
       // Check restrictions for each time point
       let hasRestrictions = false;
@@ -327,7 +342,7 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
       const tripData = {
         id: crypto.randomUUID(),
         type: 'internal',
-        datetime: tripDateTimeISO, // Use the timeline date at noon
+        datetime: tripDateTimeISO, // Use the selected timestamp
         source_track_id: sourceTrackId,
         dest_track_id: track.id,
         project_id: projectId,
@@ -398,6 +413,16 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
     }
   };
 
+  // Calculate position for current time indicator
+  const currentTimePosition = useMemo(() => {
+    if (!selectedDateTime || !startDate || !endDate) return 0;
+    
+    const totalMs = endDate.getTime() - startDate.getTime();
+    const elapsedMs = selectedDateTime.getTime() - startDate.getTime();
+    
+    return (elapsedMs / totalMs) * 100;
+  }, [selectedDateTime, startDate, endDate]);
+
   if (loading) {
     return (
       <div className="h-16 bg-gray-50 animate-pulse rounded">
@@ -429,7 +454,7 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
 
   return (
     <div 
-      className={`mb-5 bg-white p-3 rounded-lg shadow-sm border ${
+      className={`relative mb-6 ${
         isDragOver ? 'border-primary border-2' : 'border-gray-200'
       } ${isSubmitting ? 'opacity-50 cursor-wait' : ''}`}
       onDragOver={handleDragOver}
@@ -449,7 +474,7 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
       </div>
 
       {/* Track capacity visualization */}
-      <div className="relative h-10 bg-gray-100 rounded-md overflow-hidden">
+      <div className="relative h-16 bg-gray-100 rounded-md overflow-hidden shadow-sm">
         {/* Occupied area */}
         <div 
           className="absolute top-0 h-full bg-blue-200" 
@@ -470,24 +495,62 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
             constructionSiteName = constructionSites[wagon.construction_site_id].name;
           }
           
+          // Get wagon type name from type_id or custom_type
+          // We use any type assertion since the wagon_types property might come from the DB query
+          const wagonData = wagon as any;
+          const wagonTypeName = wagonData.wagon_types?.name || wagonData.custom_type || '';
+          
+          // Get last 4 digits of ID (from number or temp_id)
+          const displayId = wagon.number ? 
+            wagon.number.slice(-4) : 
+            (wagon.temp_id ? wagon.temp_id.slice(-4) : wagon.id.slice(-4));
+          
+          // Create readable tooltip with better formatting
+          const tooltipContent = `
+Typ: ${wagonTypeName}
+ID: ${wagon.number || wagon.temp_id || wagon.id}
+Länge: ${wagon.length}m
+${constructionSiteName ? `Baustelle: ${constructionSiteName}` : ''}
+`.trim();
+          
           return (
             <div
               key={wagon.id}
-              className={`absolute top-0 h-full ${wagonColor} border-r flex items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
+              className={`absolute top-0 h-full ${wagonColor} border-r flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
               style={{ 
                 left: `${wagonLeft}%`, 
                 width: `${wagonWidth}%`,
-                minWidth: '10px' // Ensure very small wagons are still visible
+                minWidth: wagonWidth < 1 ? '20px' : '25px' // Adjust minimum size based on relative width
               }}
-              title={`${wagon.number || wagon.id} (${wagon.length}m)${constructionSiteName ? ` - Baustelle: ${constructionSiteName}` : ''}`}
+              title={tooltipContent}
               onClick={() => onWagonSelect && onWagonSelect(wagon.id)}
               draggable
               onDragStart={(e) => handleDragStart(e, wagon)}
             >
-              <span className={`text-white truncate overflow-hidden text-center ${wagonWidth <= 5 ? 'text-[8px] leading-none px-0' : 'text-xs px-1'}`} 
-                style={{ maxWidth: '100%' }}>
-                {wagon.number || 'W'}
-              </span>
+              <div className="flex flex-col items-center justify-center h-full w-full px-0.5">
+                {/* For larger wagons, show type and construction site */}
+                {wagonWidth > 6 && (
+                  <span className={`text-white text-center leading-tight font-medium ${wagonWidth <= 12 ? 'text-[9px]' : 'text-xs'}`}>
+                    {wagonTypeName}{constructionSiteName ? ` - ${constructionSiteName.substring(0, 6)}${constructionSiteName.length > 6 ? '...' : ''}` : ''}
+                  </span>
+                )}
+                
+                {/* For medium wagons, show simplified info */}
+                {wagonWidth <= 6 && wagonWidth > 3 && (
+                  <span className="text-white text-center leading-none text-[8px]">
+                    {wagonTypeName ? wagonTypeName.substring(0, 4) : ''}
+                  </span>
+                )}
+                
+                {/* Always show the ID */}
+                <span className={`text-white text-center font-bold ${
+                  wagonWidth <= 3 ? 'text-[7px] leading-none' : 
+                  wagonWidth <= 6 ? 'text-[8px] leading-none' : 
+                  wagonWidth <= 10 ? 'text-[10px]' : 'text-sm'
+                }`}>
+                  {displayId}
+                </span>
+              </div>
             </div>
           );
         })}
