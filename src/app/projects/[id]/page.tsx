@@ -10,6 +10,7 @@ import ProjectUserList from '@/components/projects/users/ProjectUserList';
 import NodeList from '@/components/projects/nodes/NodeList';
 import TripList from '@/components/projects/trips/TripList';
 import RestrictionList from '@/components/projects/restrictions/RestrictionList';
+import { ProjectCleanup } from '@/components/projects/project-cleanup';
 
 export default function ProjectDetailPage({ params }: { params: { id: string } }) {
   const router = useRouter();
@@ -226,6 +227,21 @@ export default function ProjectDetailPage({ params }: { params: { id: string } }
           {project.created_at !== project.updated_at && (
             <p>Aktualisiert am: {new Date(project.updated_at).toLocaleDateString('de-DE')}</p>
           )}
+        </div>
+        
+        {/* Add the ProjectCleanup component here */}
+        <div className="mt-6 pt-4 border-t border-gray-200">
+          <h2 className="text-lg font-semibold mb-2">Admin-Aktionen</h2>
+          <div className="flex items-center">
+            <ProjectCleanup 
+              projectId={project.id} 
+              projectName={project.name}
+              onSuccess={() => showNotification('Projektdaten wurden erfolgreich bereinigt', 'success')}
+            />
+            <p className="ml-4 text-sm text-gray-500">
+              Entfernt alle Waggons, Trips und Restriktionen, behält aber die Projektstruktur (Knoten und Gleise).
+            </p>
+          </div>
         </div>
       </div>
 

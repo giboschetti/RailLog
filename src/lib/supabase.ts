@@ -78,10 +78,11 @@ export type Trip = {
   source_track_id?: string;
   dest_track_id?: string;
   transport_plan_number?: string;
-  transport_plan_file?: string;
+  transport_plan_file?: string; // URL to the transport plan file
   project_id: string;
   is_planned: boolean;
   has_conflicts?: boolean; // Flag for trips with capacity or restriction conflicts
+  construction_site_id?: string; // Reference to a construction site node
   comment?: string;
   created_at: string;
   updated_at: string;

@@ -31,7 +31,7 @@ export interface FormattedTrajectory extends WagonTrajectory {
 
 const moveTypeLabels: Record<string, string> = {
   initial: 'Erstplatzierung',
-  delivery: 'Anlieferung',
+  delivery: 'Anlieferung/Erstplatzierung',
   departure: 'Abfahrt',
   internal: 'Interne Bewegung',
   manual: 'Manuelle Änderung'

@@ -1,18 +1,23 @@
--- Function to create an internal trip with wagon movement in a single transaction
+-- Update create_internal_trip function to properly handle is_planned flag
 CREATE OR REPLACE FUNCTION public.create_internal_trip(
-  trip_data JSON,
-  wagon_id_param UUID
+  trip_data json,
+  wagon_id_param uuid
 )
-RETURNS VOID AS $$
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER  -- Run with definer's privileges to bypass RLS
+AS $$
 DECLARE
   trip_id UUID;
   dest_track_id UUID;
+  is_planned BOOLEAN;
 BEGIN
   -- Start a transaction
   BEGIN
     -- Extract trip id and destination track from the JSON data
     trip_id := (trip_data->>'id')::UUID;
     dest_track_id := (trip_data->>'dest_track_id')::UUID;
+    is_planned := (trip_data->>'is_planned')::BOOLEAN;
     
     -- Insert the trip
     INSERT INTO trips (
@@ -34,7 +39,7 @@ BEGIN
       (trip_data->>'source_track_id')::UUID,
       dest_track_id,
       (trip_data->>'project_id')::UUID,
-      (trip_data->>'is_planned')::BOOLEAN,
+      is_planned,
       (trip_data->>'created_at')::TIMESTAMPTZ,
       (trip_data->>'updated_at')::TIMESTAMPTZ,
       (trip_data->>'has_conflicts')::BOOLEAN,
@@ -50,7 +55,8 @@ BEGIN
       wagon_id_param
     );
     
-    -- Update wagon's current track
+    -- Always update current_track_id to maintain link between wagons and tracks
+    -- This ensures the UI displays wagons correctly
     UPDATE wagons
     SET current_track_id = dest_track_id
     WHERE id = wagon_id_param;
@@ -63,14 +69,4 @@ BEGIN
     RAISE;
   END;
 END;
-$$ LANGUAGE plpgsql;
-
--- Example usage:
--- SELECT create_internal_trip(
---   '{"id":"example-uuid", "type":"internal", "datetime":"2023-01-01T12:00:00Z", 
---     "source_track_id":"source-uuid", "dest_track_id":"dest-uuid", 
---     "project_id":"project-uuid", "is_planned":false, 
---     "created_at":"2023-01-01T12:00:00Z", "updated_at":"2023-01-01T12:00:00Z",
---     "has_conflicts":false, "construction_site_id":null}',
---   'wagon-uuid'
--- ); 
+$$; 

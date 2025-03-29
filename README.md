@@ -71,4 +71,27 @@ Die Anwendung wurde mit einer zeitbasierten Kapazitätsplanung erweitert:
 ### Testseite für Zeitplanung
 
 Eine neue Testseite wurde hinzugefügt, um die zeitbasierte Planung zu testen und zu demonstrieren.
-Diese ist unter `/schedule-test` verfügbar. 
+Diese ist unter `/schedule-test` verfügbar.
+
+## Wagon Visualization in Timeline
+
+The timeline tracks show wagons based on their trip history, not based on the `current_track_id` field in the database. This ensures that:
+
+1. Wagons only appear on a track after their delivery date/time
+2. Wagon movement history is correctly preserved with "Erstplatzierung" (initial placement) and "Anlieferung" (delivery) events
+
+### Implementation Details
+
+- When a delivery trip is created, two events happen:
+  - An "Erstplatzierung" record is created immediately at the current time
+  - The actual delivery is scheduled for the user-selected date/time
+  
+- The timeline view (`TimelineTrack` component) will only show wagons that have trips with timestamps before or equal to the selected date/time.
+
+- Each wagon's movement history is tracked in the `wagon_trajectories` table, which records:
+  - When a wagon is first placed (Erstplatzierung)
+  - When it is delivered (Anlieferung)
+  - When it is moved between tracks (Interne Bewegung)
+  - When it leaves the system (Abfahrt)
+
+This approach ensures that the timeline view accurately reflects the state of the tracks at any given point in time. 

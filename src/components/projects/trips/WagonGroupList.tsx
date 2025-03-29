@@ -27,6 +27,207 @@ const EditIcon = () => (
   </svg>
 );
 
+// Separate component for the dialog to avoid state sharing issues
+const WagonNumberDialog = ({ 
+  isOpen, 
+  onClose, 
+  group, 
+  wagonTypes, 
+  constructionSites, 
+  onSave 
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  group: WagonGroup | null;
+  wagonTypes: WagonType[];
+  constructionSites: Node[];
+  onSave: (groupId: string, wagonNumbers: string[], constructionSiteId?: string) => void;
+}) => {
+  const [wagonNumbers, setWagonNumbers] = useState<string[]>([]);
+  const [numberInput, setNumberInput] = useState('');
+  const [selectedConstructionSiteId, setSelectedConstructionSiteId] = useState<string>('');
+
+  // Initialize the wagonNumbers when the dialog opens or the group changes
+  useEffect(() => {
+    if (!isOpen || !group) return;
+    
+    console.log('WagonNumberDialog: Initializing for group:', group.id);
+    
+    // Initialize with existing wagon numbers if any, or create empty slots
+    let existingNumbers: string[] = [];
+    
+    if (group.wagons && group.wagons.length > 0) {
+      existingNumbers = group.wagons.map(wagon => {
+        // Try to get the number property, which might not exist
+        const wagonAny = wagon as any;
+        return wagonAny.number || '';
+      });
+      
+      // Get the construction site ID from the first wagon
+      if (group.wagons[0]?.construction_site_id) {
+        setSelectedConstructionSiteId(group.wagons[0].construction_site_id);
+      } else {
+        setSelectedConstructionSiteId('');
+      }
+    } else {
+      setSelectedConstructionSiteId('');
+      
+      // If there are no wagons defined but we have a quantity, create empty strings
+      if (group.quantity) {
+        existingNumbers = Array(group.quantity).fill('');
+      }
+    }
+    
+    // If we have fewer existing numbers than the quantity, add empty strings
+    if (existingNumbers.length < group.quantity) {
+      existingNumbers = [
+        ...existingNumbers, 
+        ...Array(group.quantity - existingNumbers.length).fill('')
+      ];
+    }
+    
+    // Set the wagon numbers
+    setWagonNumbers(existingNumbers);
+    setNumberInput('');
+    
+    console.log('WagonNumberDialog: Initialized with', existingNumbers.length, 'numbers');
+  }, [isOpen, group]);
+
+  // Reset state when dialog closes
+  useEffect(() => {
+    if (!isOpen) {
+      setWagonNumbers([]);
+      setNumberInput('');
+      setSelectedConstructionSiteId('');
+    }
+  }, [isOpen]);
+
+  const handleAddWagonNumber = () => {
+    if (!numberInput.trim() || !group) return;
+    
+    // Add the new number and clear the input
+    setWagonNumbers([...wagonNumbers, numberInput.trim()]);
+    setNumberInput('');
+  };
+
+  const handleRemoveWagonNumber = (index: number) => {
+    setWagonNumbers(wagonNumbers.filter((_, i) => i !== index));
+  };
+
+  const handleUpdateWagonNumber = (index: number, value: string) => {
+    const updatedNumbers = [...wagonNumbers];
+    updatedNumbers[index] = value;
+    setWagonNumbers(updatedNumbers);
+  };
+
+  const handleSave = () => {
+    if (!group) return;
+    
+    // We accept both filled and empty wagon numbers
+    // Empty numbers will use temporary IDs in the backend
+    onSave(group.id, wagonNumbers, selectedConstructionSiteId || undefined);
+    onClose();
+  };
+
+  const getWagonTypeName = (typeId: string): string => {
+    // Handle temporary types created when no wagon types are available
+    if (typeId.startsWith('temp-type-')) {
+      return 'Temporärer Waggontyp';
+    }
+    
+    const type = wagonTypes.find(t => t.id === typeId);
+    return type ? type.name : 'Unbekannter Typ';
+  };
+
+  if (!group) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={(open) => {
+      if (!open) onClose();
+    }}>
+      <DialogContent className="sm:max-w-[500px]">
+        <DialogHeader>
+          <DialogTitle>
+            Waggon-Nummern für {getWagonTypeName(group.wagonTypeId)}
+          </DialogTitle>
+        </DialogHeader>
+        
+        <div className="mt-4 space-y-4">
+          <p className="text-sm text-gray-600">
+            Die Eingabe von Waggon-Nummern ist optional. Leere Nummern erhalten eine temporäre ID.
+          </p>
+          
+          {/* Construction site dropdown */}
+          <div className="space-y-2">
+            <label htmlFor="constructionSite" className="block text-sm font-medium text-gray-700">
+              Baustelle
+            </label>
+            <select
+              id="constructionSite"
+              value={selectedConstructionSiteId}
+              onChange={(e) => setSelectedConstructionSiteId(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+            >
+              <option value="">Keine Baustelle ausgewählt</option>
+              {constructionSites.map((site) => (
+                <option key={site.id} value={site.id}>
+                  {site.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          
+          <div className="space-y-2">
+            {wagonNumbers.map((number, index) => (
+              <div key={index} className="flex items-center gap-2">
+                <Input
+                  value={number}
+                  onChange={(e) => handleUpdateWagonNumber(index, e.target.value)}
+                  placeholder={`Waggon ${index + 1} Nummer (optional)`}
+                  className="flex-1"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleRemoveWagonNumber(index)}
+                >
+                  <XIcon />
+                </Button>
+              </div>
+            ))}
+          </div>
+          
+          <div className="flex items-center gap-2">
+            <Input
+              value={numberInput}
+              onChange={(e) => setNumberInput(e.target.value)}
+              placeholder="Neue Waggon-Nummer (optional)"
+              className="flex-1"
+              onKeyDown={(e: React.KeyboardEvent) => e.key === 'Enter' && handleAddWagonNumber()}
+            />
+            <Button
+              type="button"
+              onClick={handleAddWagonNumber}
+            >
+              Hinzufügen
+            </Button>
+          </div>
+        </div>
+        
+        <DialogFooter>
+          <Button variant="outline" type="button" onClick={onClose}>
+            Abbrechen
+          </Button>
+          <Button type="button" onClick={handleSave}>
+            Speichern
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
 interface WagonGroupListProps {
   wagonGroups: WagonGroup[];
   wagonTypes: WagonType[];
@@ -43,11 +244,10 @@ const WagonGroupList: React.FC<WagonGroupListProps> = ({
   onUpdateWagons 
 }) => {
   const { supabase } = useSupabase();
+  // IMPORTANT: Keep dialog state completely separate from selected group
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState<WagonGroup | null>(null);
-  const [wagonNumbers, setWagonNumbers] = useState<string[]>([]);
-  const [numberInput, setNumberInput] = useState('');
   const [constructionSites, setConstructionSites] = useState<Node[]>([]);
-  const [selectedConstructionSiteId, setSelectedConstructionSiteId] = useState<string>('');
   const [loading, setLoading] = useState(false);
 
   // Fetch construction sites for the current project
@@ -77,69 +277,33 @@ const WagonGroupList: React.FC<WagonGroupListProps> = ({
   }, [projectId, supabase]);
 
   const handleOpenDialog = (group: WagonGroup) => {
+    console.log('User clicked to open dialog for group:', group.id);
+    
+    // Make sure the group has a wagons array
+    if (!group.wagons) {
+      console.log('WagonGroupList: Group missing wagons array:', group.id);
+      group.wagons = [];
+    }
+    
+    // First set the selected group
     setSelectedGroup(group);
     
-    // Initialize with existing wagon numbers if any, or create empty slots
-    let existingNumbers: string[] = [];
-    
-    if (group.wagons && group.wagons.length > 0) {
-      existingNumbers = group.wagons.map(wagon => {
-        // Try to get the number property, which might not exist
-        const wagonAny = wagon as any;
-        return wagonAny.number || '';
-      });
-      
-      // Get the construction site ID from the first wagon (assuming all wagons in a group have the same construction site)
-      if (group.wagons[0]?.construction_site_id) {
-        setSelectedConstructionSiteId(group.wagons[0].construction_site_id);
-      } else {
-        setSelectedConstructionSiteId('');
-      }
-    } else {
-      setSelectedConstructionSiteId('');
-    }
-    
-    // If we have fewer existing numbers than the quantity, add empty strings
-    if (existingNumbers.length < group.quantity) {
-      existingNumbers = [
-        ...existingNumbers, 
-        ...Array(group.quantity - existingNumbers.length).fill('')
-      ];
-    }
-    
-    setWagonNumbers(existingNumbers);
-    setNumberInput('');
+    // Then open the dialog
+    setTimeout(() => {
+      console.log('Opening dialog for group:', group.id);
+      setDialogOpen(true);
+    }, 50);
   };
 
   const handleCloseDialog = () => {
-    setSelectedGroup(null);
-  };
-
-  const handleAddWagonNumber = () => {
-    if (!numberInput.trim() || !selectedGroup) return;
+    console.log('Closing dialog');
+    // First close the dialog
+    setDialogOpen(false);
     
-    // Add the new number and clear the input
-    setWagonNumbers([...wagonNumbers, numberInput.trim()]);
-    setNumberInput('');
-  };
-
-  const handleRemoveWagonNumber = (index: number) => {
-    setWagonNumbers(wagonNumbers.filter((_, i) => i !== index));
-  };
-
-  const handleUpdateWagonNumber = (index: number, value: string) => {
-    const updatedNumbers = [...wagonNumbers];
-    updatedNumbers[index] = value;
-    setWagonNumbers(updatedNumbers);
-  };
-
-  const handleSave = () => {
-    if (!selectedGroup) return;
-    
-    // We accept both filled and empty wagon numbers
-    // Empty numbers will use temporary IDs in the backend
-    onUpdateWagons(selectedGroup.id, wagonNumbers, selectedConstructionSiteId || undefined);
-    handleCloseDialog();
+    // Then reset the selected group after a delay
+    setTimeout(() => {
+      setSelectedGroup(null);
+    }, 100);
   };
 
   const getWagonTypeName = (typeId: string): string => {
@@ -161,9 +325,15 @@ const WagonGroupList: React.FC<WagonGroupListProps> = ({
       <h3 className="text-sm font-medium">Hinzugefügte Waggongruppen</h3>
       
       {wagonGroups.map(group => {
+        // Defensive check for wagons array
+        if (!group.wagons) {
+          console.log('WagonGroupList: Group missing wagons array:', group.id);
+          group.wagons = [];
+        }
+        
         // Get the construction site name if any wagon in the group has a construction site assigned
         let constructionSiteName = '';
-        if (group.wagons.length > 0 && group.wagons[0]?.construction_site_id) {
+        if (group.wagons && group.wagons.length > 0 && group.wagons[0]?.construction_site_id) {
           const site = constructionSites.find(cs => cs.id === group.wagons[0].construction_site_id);
           constructionSiteName = site ? site.name : '';
         }
@@ -184,7 +354,7 @@ const WagonGroupList: React.FC<WagonGroupListProps> = ({
                 </div>
               )}
               <div className="text-xs text-gray-500 mt-1">
-                {group.wagons.length > 0 
+                {group.wagons && group.wagons.length > 0 
                   ? `${group.wagons.filter(w => (w as any).number).length} Waggon-Nummern definiert` 
                   : 'Keine Waggon-Nummern definiert'}
               </div>
@@ -214,88 +384,15 @@ const WagonGroupList: React.FC<WagonGroupListProps> = ({
         );
       })}
 
-      {/* Dialog for editing wagon numbers */}
-      <Dialog open={!!selectedGroup} onOpenChange={(open: boolean) => !open && handleCloseDialog()}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
-            <DialogTitle>
-              Waggon-Nummern für {selectedGroup && getWagonTypeName(selectedGroup.wagonTypeId)}
-            </DialogTitle>
-          </DialogHeader>
-          
-          <div className="mt-4 space-y-4">
-            <p className="text-sm text-gray-600">
-              Die Eingabe von Waggon-Nummern ist optional. Leere Nummern erhalten eine temporäre ID.
-            </p>
-            
-            {/* Construction site dropdown */}
-            <div className="space-y-2">
-              <label htmlFor="constructionSite" className="block text-sm font-medium text-gray-700">
-                Baustelle
-              </label>
-              <select
-                id="constructionSite"
-                value={selectedConstructionSiteId}
-                onChange={(e) => setSelectedConstructionSiteId(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md"
-              >
-                <option value="">Keine Baustelle ausgewählt</option>
-                {constructionSites.map((site) => (
-                  <option key={site.id} value={site.id}>
-                    {site.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="space-y-2">
-              {wagonNumbers.map((number, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <Input
-                    value={number}
-                    onChange={(e) => handleUpdateWagonNumber(index, e.target.value)}
-                    placeholder={`Waggon ${index + 1} Nummer (optional)`}
-                    className="flex-1"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleRemoveWagonNumber(index)}
-                  >
-                    <XIcon />
-                  </Button>
-                </div>
-              ))}
-            </div>
-            
-            <div className="flex items-center gap-2">
-              <Input
-                value={numberInput}
-                onChange={(e) => setNumberInput(e.target.value)}
-                placeholder="Neue Waggon-Nummer (optional)"
-                className="flex-1"
-                onKeyDown={(e: React.KeyboardEvent) => e.key === 'Enter' && handleAddWagonNumber()}
-              />
-              <Button
-                type="button"
-                onClick={handleAddWagonNumber}
-              >
-                Hinzufügen
-              </Button>
-            </div>
-          </div>
-          
-          <DialogFooter>
-            <Button variant="outline" type="button" onClick={handleCloseDialog}>
-              Abbrechen
-            </Button>
-            <Button type="button" onClick={handleSave}>
-              Speichern
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Use the separate dialog component */}
+      <WagonNumberDialog
+        isOpen={dialogOpen}
+        onClose={handleCloseDialog}
+        group={selectedGroup}
+        wagonTypes={wagonTypes}
+        constructionSites={constructionSites}
+        onSave={onUpdateWagons}
+      />
     </div>
   );
 };

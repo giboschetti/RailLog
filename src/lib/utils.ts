@@ -89,52 +89,5 @@ export function getEndOfDay(date: Date): Date {
   return result;
 }
 
-/**
- * Utility to validate the structure of the daily_restrictions table
- * Can be called in the browser console for debugging
- */
-export async function checkDailyRestrictionsTable(supabaseClient: any) {
-  try {
-    console.log('Checking daily_restrictions table...');
-    
-    // 1. Get table definition
-    const { data: tableInfo, error: tableError } = await supabaseClient
-      .rpc('get_table_definition', { table_name: 'daily_restrictions' });
-    
-    if (tableError) {
-      console.error('Error getting table definition:', tableError);
-      
-      // Try a more basic approach - just try to select from the table
-      const { data: sample, error: sampleError } = await supabaseClient
-        .from('daily_restrictions')
-        .select('*')
-        .limit(1);
-      
-      if (sampleError) {
-        console.error('Error selecting from daily_restrictions:', sampleError);
-        return { success: false, error: sampleError };
-      }
-      
-      console.log('Sample record from daily_restrictions:', sample);
-      return { success: true, sampleData: sample };
-    }
-    
-    console.log('Table definition:', tableInfo);
-    
-    // 2. Count records
-    const { count, error: countError } = await supabaseClient
-      .from('daily_restrictions')
-      .select('*', { count: 'exact', head: true });
-    
-    if (countError) {
-      console.error('Error counting records:', countError);
-    } else {
-      console.log(`Total records in daily_restrictions: ${count}`);
-    }
-    
-    return { success: true, tableInfo, count };
-  } catch (error) {
-    console.error('Error checking daily_restrictions table:', error);
-    return { success: false, error };
-  }
-} 
+// Re-export from supabase
+export * from './supabase';

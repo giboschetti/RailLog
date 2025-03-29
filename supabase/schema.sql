@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS wagons (
   content TEXT, -- Optional content description
   project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
   track_id UUID REFERENCES tracks(id) ON DELETE SET NULL, -- Current track location
+  current_track_id UUID REFERENCES tracks(id) ON DELETE SET NULL, -- Explicit current track, updated by triggers/functions
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT check_type CHECK (

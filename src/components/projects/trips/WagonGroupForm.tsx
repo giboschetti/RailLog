@@ -98,18 +98,42 @@ const WagonGroupForm: React.FC<WagonGroupFormProps> = ({
   }, [supabase]);
 
   const handleAddGroup = () => {
+    console.log('WagonGroupForm: handleAddGroup called with quantity:', quantity);
+    
     // Create a temporary type if no types available
     if (wagonTypes.length === 0) {
       const tempTypeId = 'temp-type-' + Date.now();
+      console.log('WagonGroupForm: Creating group with temporary type ID:', tempTypeId);
+      
+      // Create initialized wagon objects for each wagon in the group
+      const initializedWagons = Array(quantity).fill(0).map((_, index) => {
+        const wagonId = uuidv4();
+        console.log(`WagonGroupForm: Creating temporary wagon ${index + 1}/${quantity} with ID:`, wagonId);
+        return {
+          id: wagonId,
+          type_id: tempTypeId,
+          number: null,
+          content,
+          project_id: projectId,
+          length: 20, // Default length when no type is available
+          construction_site_id: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        } as unknown as Wagon;
+      });
+      
       const newGroup: WagonGroup = {
         id: `group-${uuidv4()}`,
         wagonTypeId: tempTypeId,
         quantity,
         content,
-        wagons: []
+        wagons: initializedWagons
       };
       
-      console.log('Adding group with temporary type:', newGroup);
+      console.log('WagonGroupForm: Adding group with temporary type and initialized wagons:', newGroup);
+      console.log('WagonGroupForm: Number of wagons created:', initializedWagons.length);
+      console.log('WagonGroupForm: Wagons array contents:', JSON.stringify(initializedWagons));
+      
       onAddGroup(newGroup);
       setContent('');
       setQuantity(1);
@@ -126,25 +150,37 @@ const WagonGroupForm: React.FC<WagonGroupFormProps> = ({
     }
     
     const selectedType = wagonTypes.find(type => type.id === actualTypeId);
-    console.log('Selected type:', selectedType);
+    console.log('WagonGroupForm: Selected type:', selectedType);
+    
+    // Create initialized wagon objects for each wagon in the group
+    const initializedWagons = Array(quantity).fill(0).map((_, index) => {
+      const wagonId = uuidv4();
+      console.log(`WagonGroupForm: Creating wagon ${index + 1}/${quantity} with ID:`, wagonId);
+      return {
+        id: wagonId,
+        type_id: actualTypeId,
+        number: null, // Explicitly set to null rather than undefined
+        length: selectedType?.default_length || 0,
+        content,
+        project_id: projectId,
+        construction_site_id: null, // Explicitly set construction_site_id to null
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      } as unknown as Wagon;
+    });
     
     const newGroup: WagonGroup = {
       id: `group-${uuidv4()}`,
       wagonTypeId: actualTypeId,
       quantity,
       content,
-      wagons: Array(quantity).fill(0).map(() => ({
-        id: uuidv4(),
-        type_id: actualTypeId,
-        length: selectedType?.default_length || 0,
-        content,
-        project_id: projectId,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      } as unknown as Wagon))
+      wagons: initializedWagons
     };
     
-    console.log('Adding group:', newGroup);
+    console.log('WagonGroupForm: Adding group with initialized wagons:', newGroup);
+    console.log('WagonGroupForm: Number of wagons created:', initializedWagons.length);
+    console.log('WagonGroupForm: Wagons array contents:', JSON.stringify(initializedWagons));
+    
     onAddGroup(newGroup);
     
     // Reset form for next entry

@@ -23,12 +23,12 @@ const ValidationWarnings: React.FC<ValidationWarningsProps> = ({ warnings }) => 
 
   return (
     <div className="space-y-4 mb-4">
-      <h3 className="text-lg font-semibold">Warnings</h3>
+      <h3 className="text-lg font-semibold">Warnungen</h3>
       
       {Object.entries(groupedWarnings).map(([type, typeWarnings]) => (
         <div key={type} className="space-y-2">
           {type !== 'general' && (
-            <h4 className="text-md font-medium capitalize">{type.replace('_', ' ')} Warnings</h4>
+            <h4 className="text-md font-medium capitalize">{getWarningTypeTitle(type)}</h4>
           )}
           
           {typeWarnings.map((warning, index) => (
@@ -40,18 +40,18 @@ const ValidationWarnings: React.FC<ValidationWarningsProps> = ({ warnings }) => 
               {/* Render additional details based on warning type */}
               {warning.type === 'future_trips' && warning.details?.trips && (
                 <div className="mt-2 space-y-1">
-                  <p className="text-sm font-medium">Affected Trips:</p>
+                  <p className="text-sm font-medium">Betroffene Fahrten:</p>
                   <ul className="text-sm space-y-1">
                     {warning.details.trips.slice(0, 3).map((trip: any, i: number) => (
                       <li key={i} className="flex items-center gap-1">
                         <Clock className="h-4 w-4" />
                         <span>
-                          {new Date(trip.datetime).toLocaleString()} - {trip.type} trip
+                          {new Date(trip.datetime).toLocaleString()} - {translateTripType(trip.type)}
                         </span>
                       </li>
                     ))}
                     {warning.details.trips.length > 3 && (
-                      <li>...and {warning.details.trips.length - 3} more</li>
+                      <li>...und {warning.details.trips.length - 3} weitere</li>
                     )}
                   </ul>
                 </div>
@@ -60,18 +60,18 @@ const ValidationWarnings: React.FC<ValidationWarningsProps> = ({ warnings }) => 
               {(warning.type === 'source_restriction' || warning.type === 'dest_restriction') && 
                warning.details?.restrictions && (
                 <div className="mt-2">
-                  <p className="text-sm font-medium">Active Restrictions:</p>
+                  <p className="text-sm font-medium">Aktive Einschränkungen:</p>
                   <ul className="text-sm">
                     {warning.details.restrictions.slice(0, 3).map((restriction: any, i: number) => (
                       <li key={i} className="flex items-center gap-1">
                         <AlertTriangle className="h-4 w-4" />
                         <span>
-                          {restriction.comment || 'No details available'}
+                          {restriction.comment || 'Keine Details verfügbar'}
                         </span>
                       </li>
                     ))}
                     {warning.details.restrictions.length > 3 && (
-                      <li>...and {warning.details.restrictions.length - 3} more</li>
+                      <li>...und {warning.details.restrictions.length - 3} weitere</li>
                     )}
                   </ul>
                 </div>
@@ -82,8 +82,8 @@ const ValidationWarnings: React.FC<ValidationWarningsProps> = ({ warnings }) => 
       ))}
       
       <p className="text-sm text-gray-600">
-        These warnings don't prevent the trip from being created, but may cause operational issues.
-        Please review and confirm if you want to proceed despite these warnings.
+        Diese Warnungen verhindern nicht die Erstellung der Fahrt, können aber zu betrieblichen Problemen führen.
+        Bitte prüfen Sie und bestätigen Sie, ob Sie trotz dieser Warnungen fortfahren möchten.
       </p>
     </div>
   );
@@ -106,15 +106,49 @@ function getWarningIcon(warning: ValidationWarning) {
 function getWarningTitle(warning: ValidationWarning) {
   switch (warning.type) {
     case 'future_trips':
-      return 'Dependent Trips Warning';
+      return 'Abhängige Fahrten Warnung';
     case 'source_restriction':
-      return 'Source Track Restriction';
+      return 'Quellgleis Einschränkung';
     case 'dest_restriction':
-      return 'Destination Track Restriction';
+      return 'Zielgleis Einschränkung';
     case 'restriction':
-      return 'Track Restriction';
+      return 'Gleis Einschränkung';
     default:
-      return 'Warning';
+      return 'Warnung';
+  }
+}
+
+// Helper function to translate warning type categories to German
+function getWarningTypeTitle(type: string): string {
+  switch (type) {
+    case 'restriction':
+      return 'Einschränkungen';
+    case 'future_trips':
+      return 'Zukünftige Fahrten';
+    case 'source_restriction':
+      return 'Quellgleis Einschränkungen';
+    case 'dest_restriction':
+      return 'Zielgleis Einschränkungen';
+    case 'time_proximity':
+      return 'Zeitliche Nähe Warnungen';
+    case 'same_day_trips':
+      return 'Fahrten am gleichen Tag';
+    default:
+      return type.replace('_', ' ') + ' Warnungen';
+  }
+}
+
+// Helper function to translate trip types to German
+function translateTripType(type: string): string {
+  switch (type) {
+    case 'delivery':
+      return 'Lieferung';
+    case 'departure':
+      return 'Abfahrt';
+    case 'internal':
+      return 'Interne Bewegung';
+    default:
+      return type;
   }
 }
 

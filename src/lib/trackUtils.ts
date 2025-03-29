@@ -618,6 +618,23 @@ export interface TrackWithOccupancy extends Track {
 }
 
 /**
+ * Wagon interface
+ */
+export interface Wagon {
+  id: string;
+  type_id?: string;
+  number?: string;
+  temp_id?: string;
+  length: number;
+  content?: string;
+  project_id?: string;
+  construction_site_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  wagon_types?: any; // For the joined table data
+}
+
+/**
  * Wagon with additional track-specific information
  */
 export interface WagonOnTrack extends Wagon {
@@ -626,10 +643,47 @@ export interface WagonOnTrack extends Wagon {
 }
 
 /**
- * Enhanced version of getTrackOccupancyAtTime that uses trip replay for accurate occupancy
- * @param trackId The track ID to check
- * @param datetime The point in time to check
- * @returns Object containing track data, wagons on track, and occupancy details
+ * Interface for trajectory data returned from the SQL function
+ */
+interface TrajectoryData {
+  trajectory_id: string;
+  wagon_id: string;
+  event_time: string;
+  move_type: string;
+}
+
+/**
+ * Type guard to validate and transform trajectory data if necessary
+ */
+function validateTrajectoryData(data: any[]): TrajectoryData[] {
+  if (!data || !Array.isArray(data) || data.length === 0) {
+    return [];
+  }
+  
+  // Check if the data is already in the expected format
+  if (data[0].trajectory_id && data[0].wagon_id && data[0].event_time && data[0].move_type) {
+    return data as TrajectoryData[];
+  }
+  
+  // If data is in a different format, try to transform it
+  console.log("Transforming trajectory data to expected format");
+  
+  return data.map(item => {
+    // Create a new object with the expected structure
+    const transformedItem: TrajectoryData = {
+      trajectory_id: item.trajectory_id || item.id || '',
+      wagon_id: item.wagon_id || '',
+      event_time: item.event_time || item.timestamp || new Date().toISOString(),
+      move_type: item.move_type || 'unknown'
+    };
+    
+    return transformedItem;
+  });
+}
+
+/**
+ * Advanced function to get track occupancy information with wagon details
+ * Uses the enhanced function that relies on wagon_trajectories
  */
 export async function getEnhancedTrackOccupancy(
   trackId: string,
@@ -641,9 +695,7 @@ export async function getEnhancedTrackOccupancy(
   errorMessage?: string;
 }> {
   try {
-    console.log(`Getting enhanced occupancy for track ${trackId} at ${datetime}`);
-    
-    // 1. Get track information
+    // 1. Get track details first
     const { data: trackData, error: trackError } = await supabase
       .from('tracks')
       .select('*')
@@ -651,137 +703,127 @@ export async function getEnhancedTrackOccupancy(
       .single();
     
     if (trackError) {
-      console.error("Track fetch error:", trackError);
-      return { 
-        success: false, 
-        trackData: null, 
-        wagons: [],
-        errorMessage: `Error fetching track: ${trackError.message}` 
-      };
+      console.error("Error fetching track data:", trackError);
+      return { success: false, trackData: null, wagons: [], errorMessage: `Error loading track: ${trackError.message}` };
     }
     
-    if (!trackData) {
-      return { 
-        success: false, 
-        trackData: null, 
-        wagons: [],
-        errorMessage: "Track not found" 
-      };
-    }
-
-    const track = trackData as Track;
+    const track = trackData;
     const totalLength = track.useful_length || 0;
     
-    // Check if we're looking at a past date, current date, or future date
-    const dateParam = new Date(datetime);
-    const currentDate = new Date();
-    const isSameDay = dateParam.toDateString() === currentDate.toDateString();
-    const isPastDate = dateParam < currentDate && !isSameDay;
-    const isFutureDate = dateParam > currentDate && !isSameDay;
-
-    // 2. Get all trips affecting this track up to the specified datetime
-    let tripsQuery = supabase
-      .from('trips')
-      .select(`
-        id, type, datetime, source_track_id, dest_track_id, is_planned,
-        trip_wagons(wagon_id)
-      `)
-      .or(`source_track_id.eq.${trackId},dest_track_id.eq.${trackId}`)
-      .lte('datetime', datetime)
-      .order('datetime', { ascending: true });
+    // 2. Use the updated RPC function to get wagons at this specific time
+    // The function now handles proper deduplication based on updated_at
+    console.log(`Fetching wagons on track ${trackId} at ${datetime}`);
     
-    // For past dates, only include executed trips (not planned)
-    if (isPastDate) {
-      tripsQuery = tripsQuery.eq('is_planned', false);
-    }
+    const { data: rawTrajectoryData, error: trajectoryError } = await supabase
+      .rpc('get_track_wagons_at_time', {
+        track_id_param: trackId,
+        time_param: datetime
+      });
     
-    // For current date or future dates, include planned and executed trips
-    // to show the projected state at the end of the day
+    // Process the data from RPC call or try fallback approach
+    let trajectoryData: any[] = [];
     
-    const { data: tripsData, error: tripsError } = await tripsQuery;
-    
-    if (tripsError) {
-      console.error("Trips fetch error:", tripsError);
-      return { 
-        success: false, 
-        trackData: null, 
-        wagons: [],
-        errorMessage: `Error fetching trips: ${tripsError.message}` 
-      };
-    }
-    
-    console.log(`Found ${tripsData.length} trips affecting track ${trackId}`);
-    
-    // 3. Get all wagons that could be on this track
-    // Extract all wagon IDs from the trips
-    const allTripWagonIds = tripsData
-      .flatMap(trip => trip.trip_wagons)
-      .map(tw => tw.wagon_id);
-    
-    console.log(`Found ${allTripWagonIds.length} total wagon IDs from trips`);
-    
-    // When showing current state without any trips affecting this track,
-    // just use the current_track_id as the source of truth
-    if (allTripWagonIds.length === 0) {
-      console.log("No trips found - using current_track_id for wagon locations");
+    if (trajectoryError) {
+      console.error("Error with trajectory query:", trajectoryError);
       
-      // First, get all wagons that have this track as their current_track_id
-      const { data: currentWagons, error: currentWagonsError } = await supabase
-        .from('wagons')
-        .select(`
-          id, 
-          type_id, 
-          number, 
-          length, 
-          content,
-          project_id,
-          construction_site_id,
-          current_track_id,
-          wagon_types(name, default_length)
-        `)
-        .eq('current_track_id', trackId);
-      
-      if (currentWagonsError) {
-        console.error("Current wagons fetch error:", currentWagonsError);
-        return { 
-          success: false, 
-          trackData: null, 
+      // Use a fallback approach that matches our updated RPC logic
+      console.log("Attempting fallback query...");
+      try {
+        // First, get all trajectories up to the specified time
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from('wagon_trajectories')
+          .select('id, wagon_id, track_id, move_type, timestamp, updated_at')
+          .eq('track_id', trackId)
+          .lte('timestamp', datetime)
+          .order('updated_at', { ascending: false });
+          
+        if (fallbackError) {
+          console.error("Fallback query failed:", fallbackError);
+          return { 
+            success: false, 
+            trackData: null, 
+            wagons: [],
+            errorMessage: `Error with wagon trajectory query: ${trajectoryError.message}. Fallback also failed: ${fallbackError.message}` 
+          };
+        }
+        
+        // Manually deduplicate by keeping only the most recently updated trajectory for each wagon
+        console.log(`Fallback found ${fallbackData?.length || 0} trajectory records before filtering`);
+        
+        const latestTrajectories = new Map();
+        
+        fallbackData?.forEach(item => {
+          const existingItem = latestTrajectories.get(item.wagon_id);
+          if (!existingItem || new Date(item.updated_at) > new Date(existingItem.updated_at)) {
+            latestTrajectories.set(item.wagon_id, item);
+          }
+        });
+        
+        const uniqueFallbackData = Array.from(latestTrajectories.values());
+        console.log(`After deduplication, using ${uniqueFallbackData.length} wagon records`);
+        
+        // Transform fallback data to match expected structure
+        const transformedData = uniqueFallbackData.map(item => ({
+          trajectory_id: item.id,
+          wagon_id: item.wagon_id,
+          event_time: item.timestamp,
+          move_type: item.move_type
+        }));
+        
+        trajectoryData = validateTrajectoryData(transformedData || []);
+      } catch (fallbackError: any) {
+        console.error("Error in fallback approach:", fallbackError);
+        return {
+          success: false,
+          trackData: null,
           wagons: [],
-          errorMessage: `Error fetching current wagons: ${currentWagonsError.message}` 
+          errorMessage: `Fallback approach failed: ${fallbackError.message}`
         };
       }
-      
-      console.log(`Found ${currentWagons?.length || 0} wagons directly on track ${trackId}`);
-      
-      // Calculate occupancy statistics from current wagons
-      const occupiedLength = currentWagons?.reduce((sum, wagon) => sum + (wagon.length || 0), 0) || 0;
-      const availableLength = totalLength - occupiedLength;
-      const usagePercentage = totalLength > 0 ? (occupiedLength / totalLength) * 100 : 0;
-      
-      // Add position information to wagons
-      let currentPosition = 0;
-      const wagonsWithPosition = currentWagons ? currentWagons.map(wagon => {
-        const wagonLength = wagon.length || 0;
-        const position = currentPosition;
-        currentPosition += wagonLength;
-        return { ...wagon, position } as unknown as WagonOnTrack;
-      }) : [];
-      
+    } else {
+      // Process data from successful RPC call
+      trajectoryData = validateTrajectoryData(rawTrajectoryData || []);
+    }
+    
+    // Log the trajectories we're going to display for debugging
+    console.log(`Found ${trajectoryData.length} wagons on track ${trackId} at time ${datetime}`);
+    
+    // If no wagons found at this time, return empty track
+    if (trajectoryData.length === 0) {
       return {
         success: true,
         trackData: {
           ...track,
-          occupiedLength,
-          availableLength,
-          usagePercentage,
-          wagonCount: currentWagons?.length || 0
+          occupiedLength: 0,
+          availableLength: totalLength,
+          usagePercentage: 0,
+          wagonCount: 0
         },
-        wagons: wagonsWithPosition
+        wagons: []
       };
     }
     
-    // Get data for all the wagons involved in trips
-    let wagonsQuery = supabase
+    // CRITICAL: Ensure we're only using one trajectory per wagon by deduplicating
+    const uniqueWagonIds = new Set<string>();
+    const uniqueTrajectories = trajectoryData.filter(trajectory => {
+      // Keep only the first occurrence of each wagon_id
+      if (uniqueWagonIds.has(trajectory.wagon_id)) {
+        console.log(`Filtering out duplicate trajectory for wagon ${trajectory.wagon_id}`);
+        return false;
+      }
+      
+      uniqueWagonIds.add(trajectory.wagon_id);
+      return true;
+    });
+    
+    if (uniqueTrajectories.length < trajectoryData.length) {
+      console.log(`Removed ${trajectoryData.length - uniqueTrajectories.length} duplicate wagons from trajectory data`);
+    }
+    
+    // Get all wagon details for the found trajectories
+    const wagonIds = uniqueTrajectories.map(t => t.wagon_id);
+    
+    const { data: wagonsData, error: wagonsError } = await supabase
       .from('wagons')
       .select(`
         id, 
@@ -792,18 +834,13 @@ export async function getEnhancedTrackOccupancy(
         project_id,
         construction_site_id,
         current_track_id,
+        temp_id,
         wagon_types(name, default_length)
-      `);
-    
-    // Only use IN clause if we have wagon IDs
-    if (allTripWagonIds.length > 0) {
-      wagonsQuery = wagonsQuery.in('id', allTripWagonIds);
-    }
-    
-    const { data: wagonsData, error: wagonsError } = await wagonsQuery;
+      `)
+      .in('id', wagonIds);
     
     if (wagonsError) {
-      console.error("Wagons fetch error:", wagonsError);
+      console.error("Error fetching wagons:", wagonsError);
       return { 
         success: false, 
         trackData: null, 
@@ -812,58 +849,57 @@ export async function getEnhancedTrackOccupancy(
       };
     }
     
-    console.log(`Retrieved ${wagonsData?.length || 0} wagons data`);
+    // Create a map of wagons by ID for easy lookup
+    const wagonsById: Record<string, any> = {};
+    wagonsData.forEach(wagon => {
+      wagonsById[wagon.id] = wagon;
+    });
     
-    // 4. Replay all trips to determine current wagons on track
-    let wagonsOnTrack: WagonOnTrack[] = [];
+    // Create an array of wagons with position information
+    const wagonsOnTrack: WagonOnTrack[] = [];
+    let currentPosition = 0;
     
-    for (const trip of tripsData) {
-      const tripWagonIds = trip.trip_wagons.map(tw => tw.wagon_id);
-      const tripWagons = wagonsData.filter(w => tripWagonIds.includes(w.id));
+    // Sort trajectories by event_time to maintain chronological order
+    const sortedTrajectories = [...uniqueTrajectories].sort((a, b) => {
+      const timeA = a.event_time ? new Date(a.event_time).getTime() : 0;
+      const timeB = b.event_time ? new Date(b.event_time).getTime() : 0;
+      return timeA - timeB;
+    });
+    
+    // Log all wagons we're going to display for debugging
+    console.log(`Displaying ${sortedTrajectories.length} wagons on track ${trackId}:`);
+    sortedTrajectories.forEach(trajectory => {
+      console.log(`Wagon ${trajectory.wagon_id} - move_type: ${trajectory.move_type} - time: ${trajectory.event_time}`);
+    });
+    
+    // Use a Set to track which wagons we've already added
+    const addedWagonIds = new Set<string>();
+    
+    sortedTrajectories.forEach(trajectory => {
+      const wagon = wagonsById[trajectory.wagon_id];
+      // Skip if this wagon is already added or not found
+      if (!wagon || addedWagonIds.has(wagon.id)) {
+        console.log(`Skipping wagon ${trajectory.wagon_id} - already added or not found`);
+        return;
+      }
       
-      console.log(`Processing trip ${trip.id} of type ${trip.type} with ${tripWagonIds.length} wagons (planned: ${trip.is_planned})`);
+      const wagonLength = wagon.length || 0;
       
-      if (trip.type === 'delivery' && trip.dest_track_id === trackId) {
-        // Wagons arrived on this track
-        wagonsOnTrack = [...wagonsOnTrack, ...tripWagons] as WagonOnTrack[];
-        console.log(`Added ${tripWagons.length} wagons to track (delivery)`);
-      }
-      else if (trip.type === 'departure' && trip.source_track_id === trackId) {
-        // Wagons departed from this track
-        const beforeCount = wagonsOnTrack.length;
-        wagonsOnTrack = wagonsOnTrack.filter(w => !tripWagonIds.includes(w.id));
-        console.log(`Removed ${beforeCount - wagonsOnTrack.length} wagons from track (departure)`);
-      }
-      else if (trip.type === 'internal') {
-        if (trip.dest_track_id === trackId) {
-          // Wagons arrived on this track
-          wagonsOnTrack = [...wagonsOnTrack, ...tripWagons] as WagonOnTrack[];
-          console.log(`Added ${tripWagons.length} wagons to track (internal arrival)`);
-        }
-        if (trip.source_track_id === trackId) {
-          // Wagons departed from this track
-          const beforeCount = wagonsOnTrack.length;
-          wagonsOnTrack = wagonsOnTrack.filter(w => !tripWagonIds.includes(w.id));
-          console.log(`Removed ${beforeCount - wagonsOnTrack.length} wagons from track (internal departure)`);
-        }
-      }
-    }
+      wagonsOnTrack.push({
+        ...wagon,
+        position: currentPosition
+      } as WagonOnTrack);
+      
+      // Mark this wagon as added
+      addedWagonIds.add(wagon.id);
+      
+      currentPosition += wagonLength;
+    });
     
-    console.log(`After replaying trips: ${wagonsOnTrack.length} wagons on track ${trackId}`);
-    
-    // 5. Calculate occupancy statistics
+    // Calculate occupancy statistics
     const occupiedLength = wagonsOnTrack.reduce((sum, wagon) => sum + (wagon.length || 0), 0);
     const availableLength = Math.max(0, totalLength - occupiedLength);
     const usagePercentage = totalLength > 0 ? (occupiedLength / totalLength) * 100 : 0;
-    
-    // 6. Add position information to wagons
-    let currentPosition = 0;
-    const wagonsWithPosition = wagonsOnTrack.map(wagon => {
-      const wagonLength = wagon.length || 0;
-      const position = currentPosition;
-      currentPosition += wagonLength;
-      return { ...wagon, position };
-    });
     
     return {
       success: true,
@@ -874,15 +910,15 @@ export async function getEnhancedTrackOccupancy(
         usagePercentage,
         wagonCount: wagonsOnTrack.length
       },
-      wagons: wagonsWithPosition
+      wagons: wagonsOnTrack
     };
   } catch (error: any) {
-    console.error("Error calculating track occupancy:", error);
+    console.error("Unexpected error in getEnhancedTrackOccupancy:", error);
     return {
       success: false,
       trackData: null,
       wagons: [],
-      errorMessage: error.message || "Unknown error calculating track occupancy"
+      errorMessage: `Unexpected error: ${error.message}`
     };
   }
 }
@@ -1322,4 +1358,137 @@ export function validateDragDrop(
     errors,
     warnings: [] // For quick validation, we skip generating warnings
   };
+}
+
+/**
+ * Get wagons on a track using the current_track_id field directly from the wagons table
+ * This is a simpler, more direct approach that avoids complex trajectory queries
+ */
+export async function getTrackWagonsFromCurrentTrackId(
+  trackId: string,
+  datetime: string
+): Promise<{
+  success: boolean;
+  trackData: TrackWithOccupancy | null;
+  wagons: WagonOnTrack[];
+  errorMessage?: string;
+}> {
+  try {
+    console.log(`Fetching track data for track ${trackId} directly from wagons table`);
+    
+    // 1. Get track details first
+    const { data: trackData, error: trackError } = await supabase
+      .from('tracks')
+      .select('*')
+      .eq('id', trackId)
+      .single();
+    
+    if (trackError) {
+      console.error("Error fetching track data:", trackError);
+      return { 
+        success: false, 
+        trackData: null, 
+        wagons: [], 
+        errorMessage: `Error loading track: ${trackError.message}` 
+      };
+    }
+    
+    const track = trackData;
+    const totalLength = track.useful_length || 0;
+    
+    // 2. Get all wagons directly using current_track_id
+    const { data: wagonsData, error: wagonsError } = await supabase
+      .from('wagons')
+      .select(`
+        id, 
+        type_id, 
+        number, 
+        length, 
+        content,
+        project_id,
+        construction_site_id,
+        current_track_id,
+        temp_id,
+        created_at,
+        updated_at,
+        wagon_types(name, default_length)
+      `)
+      .eq('current_track_id', trackId);
+    
+    if (wagonsError) {
+      console.error("Error fetching wagons:", wagonsError);
+      return { 
+        success: false, 
+        trackData: null, 
+        wagons: [],
+        errorMessage: `Error fetching wagons: ${wagonsError.message}` 
+      };
+    }
+    
+    console.log(`Found ${wagonsData.length} wagons on track ${trackId} using current_track_id approach`);
+    
+    // If no wagons found, return empty track
+    if (!wagonsData || wagonsData.length === 0) {
+      return {
+        success: true,
+        trackData: {
+          ...track,
+          occupiedLength: 0,
+          availableLength: totalLength,
+          usagePercentage: 0,
+          wagonCount: 0
+        },
+        wagons: []
+      };
+    }
+    
+    // Calculate track occupancy statistics
+    const occupiedLength = wagonsData.reduce((sum, wagon) => sum + (wagon.length || 0), 0);
+    const availableLength = totalLength > 0 ? Math.max(0, totalLength - occupiedLength) : 9999999;
+    const usagePercentage = totalLength > 0 ? (occupiedLength / totalLength) * 100 : 0;
+    
+    // Create enhanced track data
+    const enhancedTrackData: TrackWithOccupancy = {
+      ...track,
+      occupiedLength,
+      availableLength,
+      usagePercentage,
+      wagonCount: wagonsData.length
+    };
+    
+    // Create array of wagons with position information
+    // Calculate positions based on wagon order in the array
+    const wagonsOnTrack: WagonOnTrack[] = [];
+    let currentPosition = 0;
+    
+    wagonsData.forEach((wagon) => {
+      const wagonLength = wagon.length || 0;
+      
+      // Add the wagon with its calculated position
+      wagonsOnTrack.push({
+        ...wagon,
+        position: currentPosition
+      } as WagonOnTrack);
+      
+      // Update position for the next wagon
+      currentPosition += wagonLength;
+    });
+    
+    // Log result for debugging
+    console.log(`Successfully processed ${wagonsOnTrack.length} wagons with direct approach`);
+    
+    return {
+      success: true,
+      trackData: enhancedTrackData,
+      wagons: wagonsOnTrack
+    };
+  } catch (error: any) {
+    console.error("Error in getTrackWagonsFromCurrentTrackId:", error);
+    return {
+      success: false,
+      trackData: null,
+      wagons: [],
+      errorMessage: `Error retrieving track wagons: ${error.message}`
+    };
+  }
 } 

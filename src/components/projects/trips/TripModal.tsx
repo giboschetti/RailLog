@@ -213,7 +213,42 @@ const TripModal: React.FC<TripModalProps> = ({
   };
 
   const handleAddWagonGroup = (group: WagonGroup) => {
-    setWagonGroups(prev => [...prev, group]);
+    console.log('TripModal: Adding wagon group:', group);
+    
+    // Make sure the group has a properly initialized wagons array
+    // and doesn't automatically trigger the dialog
+    const wagonType = wagonTypes.find(type => type.id === group.wagonTypeId);
+    const defaultLength = wagonType?.default_length || 0;
+    
+    // Create empty wagon objects based on quantity
+    const wagons = Array(group.quantity || 1).fill(0).map(() => {
+      const tempId = uuidv4();
+      return {
+        id: tempId,
+        type_id: group.wagonTypeId,
+        number: null, // Will be filled in if needed
+        content: group.content || '',
+        temp_id: tempId,
+        length: defaultLength,
+        project_id: project.id,
+        construction_site_id: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      } as unknown as Wagon;
+    });
+    
+    // Add the group with initialized wagons
+    const newGroup: WagonGroup = {
+      ...group,
+      wagons // Properly typed wagons array
+    };
+    
+    console.log('TripModal: Adding group with initialized wagons:', newGroup);
+    console.log('TripModal: Number of wagons created:', wagons.length);
+    console.log('TripModal: Wagons array:', wagons);
+    
+    // Update state with the new group
+    setWagonGroups(prev => [...prev, newGroup]);
   };
 
   const handleRemoveWagonGroup = (groupId: string) => {
@@ -305,7 +340,7 @@ const TripModal: React.FC<TripModalProps> = ({
         }
       }
 
-      // 2. Prepare trip data
+      // 2. Prepare trip data - using only confirmed database columns
       const tripData = {
         project_id: project.id,
         datetime: dateTime,
@@ -313,14 +348,21 @@ const TripModal: React.FC<TripModalProps> = ({
         source_track_id: sourceTrackId || null,
         dest_track_id: destTrackId || null,
         transport_plan_number: transportPlanNumber || null,
-        transport_company: null, // Assuming no transport company is provided
-        construction_site_id: null, // Assuming no construction site is provided
+        transport_plan_file: transportPlanFile ? await uploadFile(transportPlanFile) : transportPlanFileUrl,
         is_planned: isPlanned,
-        has_conflict: false, // Default value
-        file_url: transportPlanFile ? await uploadFile(transportPlanFile) : null,
+        has_conflicts: validationWarnings.length > 0,
+        comment: comment || null,
+        construction_site_id: null
       };
 
-      console.log('Submitting trip:', tripData);
+      // Remove the id field from tripData if it's a new trip (causes issues with default uuid generation)
+      if (trip) {
+        // Only include ID for existing trips
+        (tripData as any).id = trip.id;
+      }
+
+      console.log('Debug: Preparing trip data with fields:', Object.keys(tripData));
+      console.log('Debug: Trip data values:', JSON.stringify(tripData));
 
       // 3. For delivery trips, pre-check capacity before creating anything
       if (type === 'delivery' && destTrackId) {
@@ -358,6 +400,14 @@ const TripModal: React.FC<TripModalProps> = ({
           .select()
           .single();
         
+        if (error) {
+          console.error('Debug: Trip insert error:', error);
+          console.error('Debug: Error details:', JSON.stringify(error));
+          console.error('Debug: Error message:', error.message);
+          console.error('Debug: Error code:', error.code);
+          console.error('Debug: Error details:', error.details);
+        }
+        
         tripId = data?.id;
         tripError = error;
       }
@@ -375,26 +425,54 @@ const TripModal: React.FC<TripModalProps> = ({
           // Prepare all wagon data for insertion
           for (const group of wagonGroups) {
             const wagonTypeId = group.wagonTypeId;
-            const wagonQuantity = group.quantity || 1;
             const wagonContent = group.content;
             
             // Get the default length for this wagon type
             const wagonType = wagonTypes.find(type => type.id === wagonTypeId);
             
-            for (let i = 0; i < wagonQuantity; i++) {
-              let wagonData = {
-                id: uuidv4(),
-                type_id: wagonTypeId,
-                length: wagonType?.default_length || 0,
-                content: wagonContent || '',
-                project_id: project.id,
-                construction_site_id: null, // Assuming no construction site is provided
-                current_track_id: destTrackId, // Set the current track ID to the destination track
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-              };
+            // Use the initialized wagons array from the group which may have numbers
+            if (group.wagons && Array.isArray(group.wagons) && group.wagons.length > 0) {
+              console.log(`Processing ${group.wagons.length} wagons from group with type: ${wagonTypeId}`);
               
-              wagonsToCreate.push(wagonData);
+              for (const wagon of group.wagons) {
+                // Log the current wagon number being processed
+                console.log(`Processing wagon with number: ${wagon.number || 'null'}`);
+                
+                let wagonData = {
+                  id: uuidv4(),
+                  type_id: wagonTypeId,
+                  length: wagonType?.default_length || 0,
+                  content: wagonContent || '',
+                  project_id: project.id,
+                  construction_site_id: wagon.construction_site_id || null,
+                  current_track_id: isPlanned ? null : destTrackId,
+                  number: wagon.number || null, // Use the number from the wagon object
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString()
+                };
+                
+                console.log(`Adding wagon to create with number: ${wagonData.number || 'null'}`);
+                wagonsToCreate.push(wagonData);
+              }
+            } else {
+              // Fallback for cases where wagons array isn't initialized
+              const wagonQuantity = group.quantity || 1;
+              for (let i = 0; i < wagonQuantity; i++) {
+                let wagonData = {
+                  id: uuidv4(),
+                  type_id: wagonTypeId,
+                  length: wagonType?.default_length || 0,
+                  content: wagonContent || '',
+                  project_id: project.id,
+                  construction_site_id: null,
+                  current_track_id: isPlanned ? null : destTrackId,
+                  number: null,
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString()
+                };
+                
+                wagonsToCreate.push(wagonData);
+              }
             }
           }
           
@@ -402,6 +480,8 @@ const TripModal: React.FC<TripModalProps> = ({
           
           // Insert all wagons in a single operation
           if (wagonsToCreate.length > 0) {
+            console.log('Wagons to create with numbers:', wagonsToCreate.map(w => w.number));
+            
             const { data: createdWagons, error: wagonsError } = await supabase
               .from('wagons')
               .insert(wagonsToCreate)
@@ -419,8 +499,10 @@ const TripModal: React.FC<TripModalProps> = ({
               throw new Error(`Failed to create wagons: ${wagonsError.message}`);
             }
             
-            // Link wagons to the trip
+            // Link wagons to the main delivery trip
             if (createdWagons && createdWagons.length > 0) {
+              console.log('Created wagons with numbers:', createdWagons.map(w => w.number));
+              
               const tripWagons = createdWagons.map(wagon => ({
                 trip_id: tripId,
                 wagon_id: wagon.id
@@ -521,7 +603,15 @@ const TripModal: React.FC<TripModalProps> = ({
 
       // Success! Close the modal and notify parent
       console.log('Trip submitted successfully');
-      onTripSubmitted();
+      
+      // Force refresh of any timeline displays
+      if (onTripSubmitted) {
+        // Add a slight delay to allow DB triggers to complete
+        setTimeout(() => {
+          onTripSubmitted();
+        }, 500);
+      }
+      
       onClose();
     } catch (error: any) {
       console.error('Error submitting trip:', error);
@@ -607,7 +697,8 @@ const TripModal: React.FC<TripModalProps> = ({
           sourceTrackId,
           destTrackId,
           selectedWagons: selectedExistingWagons,
-          isPlanned
+          isPlanned,
+          tripId: trip?.id // Pass the existing trip ID for updates
         };
         
         const validationResult = await validateInternalTrip(internalData);
@@ -891,8 +982,37 @@ const TripModal: React.FC<TripModalProps> = ({
                   projectId={project.id}
                 />
                 
+                {/* Ensure wagon groups have properly initialized wagon arrays */}
                 <WagonGroupList 
-                  wagonGroups={wagonGroups} 
+                  wagonGroups={wagonGroups.map(group => {
+                    // Make sure each group has a properly initialized wagons array
+                    if (!group.wagons || !Array.isArray(group.wagons) || group.wagons.length === 0) {
+                      console.log('TripModal: Fixing missing wagons array for group:', group.id);
+                      const wagonType = wagonTypes.find(type => type.id === group.wagonTypeId);
+                      const defaultLength = wagonType?.default_length || 0;
+                      
+                      // Create empty wagon objects based on quantity
+                      const wagons = Array(group.quantity || 1).fill(0).map(() => {
+                        const tempId = uuidv4();
+                        return {
+                          id: tempId,
+                          type_id: group.wagonTypeId,
+                          number: null, 
+                          content: group.content || '',
+                          temp_id: tempId,
+                          length: defaultLength,
+                          project_id: project.id,
+                          construction_site_id: null,
+                          current_track_id: isPlanned ? null : destTrackId,
+                          created_at: new Date().toISOString(),
+                          updated_at: new Date().toISOString()
+                        } as unknown as Wagon;
+                      });
+                      
+                      return { ...group, wagons };
+                    }
+                    return group;
+                  })} 
                   onRemoveGroup={handleRemoveWagonGroup}
                   wagonTypes={wagonTypes}
                   projectId={project.id}
@@ -933,7 +1053,7 @@ const TripModal: React.FC<TripModalProps> = ({
         <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
           <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>Validation Warnings</DialogTitle>
+              <DialogTitle>Validierungswarnungen</DialogTitle>
             </DialogHeader>
             
             <div className="py-4">
@@ -944,7 +1064,7 @@ const TripModal: React.FC<TripModalProps> = ({
                   onClick={() => setShowConfirmDialog(false)}
                   variant="outline"
                 >
-                  Cancel
+                  Abbrechen
                 </Button>
                 <Button
                   onClick={() => {
@@ -953,7 +1073,7 @@ const TripModal: React.FC<TripModalProps> = ({
                   }}
                   variant="destructive"
                 >
-                  Proceed Anyway
+                  Trotzdem fortfahren
                 </Button>
               </div>
             </div>
@@ -1019,7 +1139,7 @@ const TripModal: React.FC<TripModalProps> = ({
         <Dialog open={showWarningDialog} onOpenChange={setShowWarningDialog}>
           <DialogContent className="max-w-3xl">
             <DialogHeader>
-              <DialogTitle>Trip Validation Warnings</DialogTitle>
+              <DialogTitle>Fahrtenvalidierung Warnungen</DialogTitle>
             </DialogHeader>
             
             <div className="py-4">
@@ -1030,7 +1150,7 @@ const TripModal: React.FC<TripModalProps> = ({
                   onClick={() => setShowWarningDialog(false)}
                   variant="outline"
                 >
-                  Cancel
+                  Abbrechen
                 </Button>
                 <Button
                   onClick={() => {
@@ -1041,7 +1161,7 @@ const TripModal: React.FC<TripModalProps> = ({
                   }}
                   variant="destructive"
                 >
-                  Proceed Anyway
+                  Trotzdem fortfahren
                 </Button>
               </div>
             </div>

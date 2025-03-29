@@ -4,8 +4,13 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { getEnhancedTrackOccupancy, TrackWithOccupancy, WagonOnTrack } from '@/lib/trackUtils';
 import { supabase } from '@/lib/supabase';
 import { Node } from '@/lib/supabase';
-import { toast } from '@/components/ui/use-toast';
+import { useToast } from '@/components/ui/use-toast';
 import { formatDateTime } from '@/lib/utils';
+import { useWagonDragDrop } from '@/hooks/useWagonDragDrop';
+import { useRouter } from 'next/navigation';
+import { 
+  getTrackWagonsFromCurrentTrackId
+} from "@/lib/trackUtils";
 
 // Define a utility function to generate colors based on construction site ID
 const getColorForConstructionSite = (siteId: string | undefined): string => {
@@ -48,6 +53,18 @@ interface TimelineTrackProps {
   selectedDateTime?: Date;  // Add this new prop for the selected time
 }
 
+// Helper function to deduplicate wagons by ID
+function deduplicateWagons(wagons: WagonOnTrack[]): WagonOnTrack[] {
+  const uniqueWagons = new Map<string, WagonOnTrack>();
+  wagons.forEach(wagon => {
+    // Only keep the first occurrence of each wagon ID
+    if (!uniqueWagons.has(wagon.id)) {
+      uniqueWagons.set(wagon.id, wagon);
+    }
+  });
+  return Array.from(uniqueWagons.values());
+}
+
 const TimelineTrack: React.FC<TimelineTrackProps> = ({ 
   track, 
   nodeName, 
@@ -65,6 +82,9 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
   const [isDragOver, setIsDragOver] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isHovering, setIsHovering] = useState(false);
+  const { toast } = useToast();
+  const { moveWagons, isMoving } = useWagonDragDrop(projectId || '');
+  const router = useRouter();
 
   // Calculate start and end dates for the current day
   const startDate = useMemo(() => {
@@ -107,35 +127,39 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
     fetchConstructionSites();
   }, []);
 
+  // Fetch wagons for this track at the current time
   useEffect(() => {
-    const fetchTrackOccupancy = async () => {
-      setLoading(true);
+    if (!track.id || !date) return;
+    
+    const fetchTrackData = async () => {
       try {
-        // The date parameter now contains the full datetime with hour precision
-        // (The old version used end of day for all visualizations)
-        const selectedDateTime = new Date(date).toISOString();
+        setLoading(true);
         
-        console.log(`Fetching track occupancy for ${track.id} at specific time: ${selectedDateTime}`);
-        const result = await getEnhancedTrackOccupancy(track.id, selectedDateTime);
-        if (result.success && result.trackData) {
-          setTrackData(result.trackData);
-          setWagons(result.wagons);
-          setError(null);
+        // Get the date in ISO format
+        const targetTime = new Date(date).toISOString();
+        
+        console.log(`Fetching wagons for track ${track.id} at ${targetTime}`);
+        
+        // Use direct current_track_id approach instead of trajectory-based method
+        const trackData = await getTrackWagonsFromCurrentTrackId(track.id, targetTime);
+        
+        if (trackData.success) {
+          setTrackData(trackData.trackData);
+          setWagons(trackData.wagons);
+          console.log(`Set ${trackData.wagons.length} wagons for track ${track.id}`);
         } else {
-          setError(result.errorMessage || 'Failed to load track data');
-          setTrackData(null);
+          console.error("Error fetching track data:", trackData.errorMessage);
           setWagons([]);
         }
-      } catch (err: any) {
-        setError(err.message || 'An error occurred');
-        setTrackData(null);
+      } catch (error) {
+        console.error(`Error loading wagons for track ${track.id}:`, error);
         setWagons([]);
       } finally {
         setLoading(false);
       }
     };
-
-    fetchTrackOccupancy();
+    
+    fetchTrackData();
   }, [track.id, date]);
 
   // Handle drag start event for wagons
@@ -176,8 +200,11 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
       const data = JSON.parse(e.dataTransfer.getData('application/json'));
       const { wagonId, sourceTrackId, date: dragDate } = data;
       
+      console.log(`Handling drop of wagon ${wagonId} from track ${sourceTrackId} to track ${track.id}`);
+      
       // Don't do anything if dropping on the same track
       if (sourceTrackId === track.id) {
+        console.log(`Wagon is already on track ${track.id}, ignoring drop`);
         return;
       }
       
@@ -186,7 +213,11 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
       // Get the date part from the ISO string for restriction checking
       const selectedDateTime = new Date(date);
       
-      // Create times to check throughout the day
+      // Use the current selected time for the actual trip time
+      const tripDateTime = new Date(date);
+      const tripDateTimeISO = tripDateTime.toISOString();
+      
+      // Check for restrictions at some key time points throughout the day
       const timeCheckPoints = [
         new Date(selectedDateTime),                    // Current selected time
         new Date(selectedDateTime.setHours(0, 1, 0, 0)), // Start of day
@@ -196,36 +227,42 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
         new Date(selectedDateTime.setHours(23, 59, 0, 0))  // End of day
       ];
       
-      // Use the current selected time for the actual trip time
-      const tripDateTime = new Date(date);
-      const tripDateTimeISO = tripDateTime.toISOString();
-      
       // Check for restrictions at each time point throughout the day
       const { checkTripRestrictions } = await import('@/lib/trackUtils');
       
       console.log(`Checking restrictions for wagon movement from track ${sourceTrackId} to track ${track.id} on ${formatDateTime(date)}`);
       
-      // Check restrictions for each time point
       let hasRestrictions = false;
       let restrictionDetails = null;
       
-      for (const checkTime of timeCheckPoints) {
-        console.log(`Checking restrictions at time: ${checkTime.toLocaleTimeString()}`);
-        const checkTimeISO = checkTime.toISOString();
-        
-        const restrictionsCheck = await checkTripRestrictions(
-          'internal',
-          checkTimeISO,
-          sourceTrackId,
-          track.id
-        );
-        
-        if (restrictionsCheck.hasRestrictions) {
-          console.log(`Found restrictions at time ${checkTime.toLocaleTimeString()}:`, restrictionsCheck);
-          hasRestrictions = true;
-          restrictionDetails = restrictionsCheck;
-          break; // Exit early if we find any restrictions
+      try {
+        for (const checkTime of timeCheckPoints) {
+          console.log(`Checking restrictions at time: ${checkTime.toLocaleTimeString()}`);
+          const checkTimeISO = checkTime.toISOString();
+          
+          const restrictionsCheck = await checkTripRestrictions(
+            'internal',
+            checkTimeISO,
+            sourceTrackId,
+            track.id
+          );
+          
+          if (restrictionsCheck.hasRestrictions) {
+            console.log(`Found restrictions at time ${checkTime.toLocaleTimeString()}:`, restrictionsCheck);
+            hasRestrictions = true;
+            restrictionDetails = restrictionsCheck;
+            break; // Exit early if we find any restrictions
+          }
         }
+      } catch (restrictionError: any) {
+        console.error("Error checking restrictions:", restrictionError);
+        toast({
+          title: "Fehler",
+          description: `Konnte Einschränkungen nicht prüfen: ${restrictionError.message || 'Unbekannter Fehler'}`,
+          variant: "destructive"
+        });
+        setIsSubmitting(false);
+        return;
       }
       
       if (hasRestrictions && restrictionDetails) {
@@ -264,148 +301,134 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
       // No restrictions, confirm the move
       const confirmMove = window.confirm(`Möchten Sie den Waggon von "${data.sourceNodeName}" nach "${nodeName}" verschieben?`);
       if (!confirmMove) {
+        console.log("User cancelled the move");
         setIsSubmitting(false);
         return;
       }
       
-      // First check if this wagon is already in a trip today
-      const startOfDay = new Date(date);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(date);
-      endOfDay.setHours(23, 59, 59, 999);
-      
-      const { data: existingTrips, error: tripCheckError } = await supabase
-        .from('trip_wagons')
-        .select(`
-          trip_id,
-          trips!inner(id, datetime, source_track_id, dest_track_id, type)
-        `)
-        .eq('wagon_id', wagonId)
-        .gte('trips.datetime', startOfDay.toISOString())
-        .lte('trips.datetime', endOfDay.toISOString());
-      
-      if (tripCheckError) {
-        console.error('Error checking existing trips:', tripCheckError);
-        toast({
-          title: "Fehler",
-          description: "Konnte nicht prüfen, ob der Waggon bereits in Bewegung ist.",
-          variant: "destructive"
-        });
-        setIsSubmitting(false);
-        return;
-      }
-      
-      // If the wagon is already in a trip today, don't allow another move
-      if (existingTrips && existingTrips.length > 0) {
-        toast({
-          title: "Waggon bereits in Bewegung",
-          description: "Dieser Waggon wird heute bereits bewegt und kann nicht erneut verschoben werden.",
-          variant: "destructive"
-        });
-        setIsSubmitting(false);
-        return;
-      }
-      
-      // Check if the wagon is currently on the source track (prevent duplicates)
-      const { data: wagonCheck, error: wagonCheckError } = await supabase
-        .from('wagons')
-        .select('current_track_id')
-        .eq('id', wagonId)
-        .single();
-      
-      if (wagonCheckError) {
-        console.error('Error checking wagon location:', wagonCheckError);
-        toast({
-          title: "Fehler",
-          description: "Konnte die aktuelle Position des Waggons nicht prüfen.",
-          variant: "destructive"
-        });
-        setIsSubmitting(false);
-        return;
-      }
-      
-      // Verify the wagon exists and check if it's actually on the source track
-      // Accept either the source track from the drag event or null if the wagon is not yet assigned to a track
-      const actualTrackId = wagonCheck?.current_track_id;
-      if (actualTrackId !== sourceTrackId && actualTrackId !== null) {
-        console.error(`Waggon location mismatch: expected track ${sourceTrackId}, but found ${actualTrackId}`);
-        toast({
-          title: "Waggon nicht gefunden",
-          description: `Der Waggon befindet sich möglicherweise nicht mehr auf dem angegebenen Gleis. Bitte aktualisieren Sie die Seite.`,
-          variant: "destructive"
-        });
-        setIsSubmitting(false);
-        return;
-      }
-      
-      // Create an internal trip
-      const tripData = {
-        id: crypto.randomUUID(),
-        type: 'internal',
-        datetime: tripDateTimeISO, // Use the selected timestamp
-        source_track_id: sourceTrackId,
-        dest_track_id: track.id,
-        project_id: projectId,
-        is_planned: false, // Mark as executed immediately
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        has_conflicts: false // No conflicts since we're enforcing restrictions
-      };
-      
+      // Check if this wagon is already in a trip within the same hour
       try {
-        // Insert the trip
-        const { error: tripError } = await supabase
-          .from('trips')
-          .insert(tripData);
-          
-        if (tripError) throw new Error(`Fehler beim Erstellen der Fahrt: ${tripError.message}`);
+        console.log(`Checking for existing trips in the time window around ${tripDateTime.toISOString()}`);
         
-        // Associate the wagon with the trip
-        const { error: wagonError } = await supabase
+        const tripHour = new Date(date);
+        const hourStart = new Date(tripHour);
+        hourStart.setMinutes(0, 0, 0);
+        const hourEnd = new Date(tripHour);
+        hourEnd.setMinutes(59, 59, 999);
+        
+        const { data: existingTrips, error: tripCheckError } = await supabase
           .from('trip_wagons')
-          .insert({
-            trip_id: tripData.id,
-            wagon_id: wagonId
+          .select(`
+            trip_id,
+            trips!inner(id, datetime, source_track_id, dest_track_id, type)
+          `)
+          .eq('wagon_id', wagonId)
+          .gte('trips.datetime', hourStart.toISOString())
+          .lte('trips.datetime', hourEnd.toISOString());
+        
+        if (tripCheckError) {
+          throw new Error(`Error checking existing trips: ${tripCheckError.message}`);
+        }
+        
+        // If the wagon is already in a trip in this hour, don't allow another move
+        if (existingTrips && existingTrips.length > 0) {
+          console.log(`Wagon ${wagonId} already has trips in this time window:`, existingTrips);
+          toast({
+            title: "Waggon bereits in Bewegung",
+            description: "Dieser Waggon wird in dieser Stunde bereits bewegt und kann nicht erneut verschoben werden.",
+            variant: "destructive"
           });
-        
-        if (wagonError) throw new Error(`Fehler beim Zuweisen des Waggons: ${wagonError.message}`);
-        
-        // Update wagon's current track
-        const { error: updateError } = await supabase
-          .from('wagons')
-          .update({ current_track_id: track.id })
-          .eq('id', wagonId);
-        
-        if (updateError) throw new Error(`Fehler beim Aktualisieren des Waggons: ${updateError.message}`);
+          setIsSubmitting(false);
+          return;
+        }
+      } catch (tripsCheckError: any) {
+        console.error("Error checking existing trips:", tripsCheckError);
+        toast({
+          title: "Fehler",
+          description: `Konnte nicht prüfen, ob der Waggon bereits in Bewegung ist: ${tripsCheckError.message || 'Unbekannter Fehler'}`,
+          variant: "destructive"
+        });
+        setIsSubmitting(false);
+        return;
+      }
       
+      // Verify the wagon exists and is on the expected track
+      try {
+        console.log(`Verifying wagon ${wagonId} location`);
+        
+        const { data: wagonCheck, error: wagonCheckError } = await supabase
+          .from('wagons')
+          .select('current_track_id')
+          .eq('id', wagonId)
+          .single();
+        
+        if (wagonCheckError) {
+          throw new Error(`Error checking wagon location: ${wagonCheckError.message}`);
+        }
+        
+        // Accept either the source track from the drag event or null if the wagon is not yet assigned to a track
+        const actualTrackId = wagonCheck?.current_track_id;
+        if (actualTrackId !== sourceTrackId && actualTrackId !== null) {
+          console.error(`Waggon location mismatch: expected track ${sourceTrackId}, but found ${actualTrackId}`);
+          toast({
+            title: "Waggon nicht gefunden",
+            description: `Der Waggon befindet sich möglicherweise nicht mehr auf dem angegebenen Gleis. Bitte aktualisieren Sie die Seite.`,
+            variant: "destructive"
+          });
+          setIsSubmitting(false);
+          return;
+        }
+      } catch (locationCheckError: any) {
+        console.error("Error verifying wagon location:", locationCheckError);
+        toast({
+          title: "Fehler",
+          description: `Konnte die aktuelle Position des Waggons nicht prüfen: ${locationCheckError.message || 'Unbekannter Fehler'}`,
+          variant: "destructive"
+        });
+        setIsSubmitting(false);
+        return;
+      }
+      
+      // All checks passed, execute the move
+      console.log(`All checks passed. Moving wagon ${wagonId} from track ${sourceTrackId} to ${track.id}`);
+      
+      // Handle the move using the wagon drag drop hook
+      try {
+        const tripId = await moveWagons(
+          sourceTrackId,
+          track.id,
+          [wagonId],
+          tripDateTimeISO,
+          undefined, // No existing trip ID
+          false // Not planned, execute immediately
+        );
+        
+        if (!tripId) {
+          throw new Error("Failed to create trip - no trip ID returned");
+        }
+        
+        console.log(`Successfully created trip ${tripId} for wagon ${wagonId}`);
+        
         // Refresh data
         if (onRefresh) {
           onRefresh();
         } else {
           // Fallback to just refreshing this track
-          const result = await getEnhancedTrackOccupancy(track.id, date);
-          if (result.success && result.trackData) {
-            setTrackData(result.trackData);
-            setWagons(result.wagons);
-          }
+          router.refresh();
         }
-        
-        const successMessage = `Der Waggon wurde erfolgreich von "${data.sourceNodeName}" nach "${nodeName}" verschoben.`;
-        
+      } catch (moveError: any) {
+        console.error("Error during wagon movement:", moveError);
         toast({
-          title: "Waggon verschoben",
-          description: successMessage,
-          variant: "default"
+          title: "Fehler beim Verschieben des Waggons",
+          description: moveError.message || "Ein unerwarteter Fehler ist aufgetreten",
+          variant: "destructive"
         });
-      } catch (innerError: any) {
-        console.error('Error in trip creation:', innerError);
-        throw innerError;
       }
     } catch (error: any) {
-      console.error('Error creating internal trip:', error);
+      console.error("Unexpected error handling drop:", error);
       toast({
         title: "Fehler",
-        description: error.message || "Fehler beim Verschieben des Waggons",
+        description: `Ein unerwarteter Fehler ist aufgetreten: ${error.message || 'Unbekannter Fehler'}`,
         variant: "destructive"
       });
     } finally {
@@ -481,79 +504,95 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
           style={{ width: `${trackData?.usagePercentage || 0}%` }}
         ></div>
         
-        {/* Individual wagons */}
-        {wagons.map((wagon) => {
-          const wagonWidth = totalLength ? (wagon.length || 0) / totalLength * 100 : 0;
-          const wagonLeft = totalLength ? (wagon.position || 0) / totalLength * 100 : 0;
-          
-          // Get color based on construction site
-          const wagonColor = getColorForConstructionSite(wagon.construction_site_id);
-          
-          // Get construction site name for tooltip
-          let constructionSiteName = '';
-          if (wagon.construction_site_id && constructionSites[wagon.construction_site_id]) {
-            constructionSiteName = constructionSites[wagon.construction_site_id].name;
-          }
-          
-          // Get wagon type name from type_id or custom_type
-          // We use any type assertion since the wagon_types property might come from the DB query
-          const wagonData = wagon as any;
-          const wagonTypeName = wagonData.wagon_types?.name || wagonData.custom_type || '';
-          
-          // Get last 4 digits of ID (from number or temp_id)
-          const displayId = wagon.number ? 
-            wagon.number.slice(-4) : 
-            (wagon.temp_id ? wagon.temp_id.slice(-4) : wagon.id.slice(-4));
-          
-          // Create readable tooltip with better formatting
-          const tooltipContent = `
+        {/* Wagons on track */}
+        <div className="relative h-10 mt-2 w-full">
+          {(() => {
+            // Final wagons deduplication check just before rendering
+            const uniqueWagons = new Map();
+            wagons.forEach(wagon => {
+              if (!wagon.id) return; // Skip wagons without ID
+              uniqueWagons.set(wagon.id, wagon);
+            });
+            
+            const finalWagons = Array.from(uniqueWagons.values());
+            if (finalWagons.length < wagons.length) {
+              console.log(`Final deduplication removed ${wagons.length - finalWagons.length} duplicate wagons before rendering`);
+            }
+            
+            // Now render only the unique wagons
+            return finalWagons
+              .sort((a, b) => (a.position || 0) - (b.position || 0))
+              .map(wagon => {
+                // Calculate position and width based on track dimensions
+                const wagonLength = wagon.length || 0;
+                const trackTotalLength = totalLength || 1;
+                const wagonLeft = (wagon.position || 0) / trackTotalLength * 100;
+                const wagonWidth = wagonLength / trackTotalLength * 100;
+                
+                // Get color based on construction site or project
+                const constructionSiteId = (wagon as any).construction_site_id;
+                const constructionSiteName = constructionSites[constructionSiteId]?.name;
+                const wagonColor = getColorForConstructionSite(constructionSiteId);
+                
+                const wagonData = wagon as any;
+                const wagonTypeName = wagonData.wagon_types?.name || wagonData.custom_type || '';
+                
+                // Get last 4 digits of ID (from number or temp_id)
+                const displayId = wagon.number ? 
+                  wagon.number.slice(-4) : 
+                  (wagon.temp_id ? wagon.temp_id.slice(-4) : wagon.id.slice(-4));
+                
+                // Create readable tooltip with better formatting
+                const tooltipContent = `
 Typ: ${wagonTypeName}
 ID: ${wagon.number || wagon.temp_id || wagon.id}
 Länge: ${wagon.length}m
 ${constructionSiteName ? `Baustelle: ${constructionSiteName}` : ''}
 `.trim();
-          
-          return (
-            <div
-              key={wagon.id}
-              className={`absolute top-0 h-full ${wagonColor} border-r flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
-              style={{ 
-                left: `${wagonLeft}%`, 
-                width: `${wagonWidth}%`,
-                minWidth: wagonWidth < 1 ? '20px' : '25px' // Adjust minimum size based on relative width
-              }}
-              title={tooltipContent}
-              onClick={() => onWagonSelect && onWagonSelect(wagon.id)}
-              draggable
-              onDragStart={(e) => handleDragStart(e, wagon)}
-            >
-              <div className="flex flex-col items-center justify-center h-full w-full px-0.5">
-                {/* For larger wagons, show type and construction site */}
-                {wagonWidth > 6 && (
-                  <span className={`text-white text-center leading-tight font-medium ${wagonWidth <= 12 ? 'text-[9px]' : 'text-xs'}`}>
-                    {wagonTypeName}{constructionSiteName ? ` - ${constructionSiteName.substring(0, 6)}${constructionSiteName.length > 6 ? '...' : ''}` : ''}
-                  </span>
-                )}
                 
-                {/* For medium wagons, show simplified info */}
-                {wagonWidth <= 6 && wagonWidth > 3 && (
-                  <span className="text-white text-center leading-none text-[8px]">
-                    {wagonTypeName ? wagonTypeName.substring(0, 4) : ''}
-                  </span>
-                )}
-                
-                {/* Always show the ID */}
-                <span className={`text-white text-center font-bold ${
-                  wagonWidth <= 3 ? 'text-[7px] leading-none' : 
-                  wagonWidth <= 6 ? 'text-[8px] leading-none' : 
-                  wagonWidth <= 10 ? 'text-[10px]' : 'text-sm'
-                }`}>
-                  {displayId}
-                </span>
-              </div>
-            </div>
-          );
-        })}
+                return (
+                  <div
+                    key={wagon.id}
+                    className={`absolute top-0 h-full ${wagonColor} border-r flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
+                    style={{ 
+                      left: `${wagonLeft}%`, 
+                      width: `${wagonWidth}%`,
+                      minWidth: wagonWidth < 1 ? '20px' : '25px' // Adjust minimum size based on relative width
+                    }}
+                    title={tooltipContent}
+                    onClick={() => onWagonSelect && onWagonSelect(wagon.id)}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, wagon)}
+                  >
+                    <div className="flex flex-col items-center justify-center h-full w-full px-0.5">
+                      {/* For larger wagons, show type and construction site */}
+                      {wagonWidth > 6 && (
+                        <span className={`text-white text-center leading-tight font-medium ${wagonWidth <= 12 ? 'text-[9px]' : 'text-xs'}`}>
+                          {wagonTypeName}{constructionSiteName ? ` - ${constructionSiteName.substring(0, 6)}${constructionSiteName.length > 6 ? '...' : ''}` : ''}
+                        </span>
+                      )}
+                      
+                      {/* For medium wagons, show simplified info */}
+                      {wagonWidth <= 6 && wagonWidth > 3 && (
+                        <span className="text-white text-center leading-none text-[8px]">
+                          {wagonTypeName ? wagonTypeName.substring(0, 4) : ''}
+                        </span>
+                      )}
+                      
+                      {/* Always show the ID */}
+                      <span className={`text-white text-center font-bold ${
+                        wagonWidth <= 3 ? 'text-[7px] leading-none' : 
+                        wagonWidth <= 6 ? 'text-[8px] leading-none' : 
+                        wagonWidth <= 10 ? 'text-[10px]' : 'text-sm'
+                      }`}>
+                        {displayId}
+                      </span>
+                    </div>
+                  </div>
+                );
+              });
+          })()}
+        </div>
       </div>
 
       {/* Additional information */}

@@ -113,7 +113,8 @@ export function TrackDropZone({ track, allTracks, projectId, tracks, wagons, onM
         sourceTrackId,
         destTrackId: track.id,
         selectedWagons: [{ id: wagonId, length: selectedWagon.length }],
-        isPlanned: true
+        isPlanned: true,
+        tripId: undefined // No tripId for new trips, allows validation to skip current trip
       };
       
       // Perform full validation with database checks
@@ -148,17 +149,15 @@ export function TrackDropZone({ track, allTracks, projectId, tracks, wagons, onM
     
     try {
       await onMove(
-        dialogData.sourceTrackId,
-        track.id,
-        dialogData.wagonIds,
+        dialogData.sourceTrackId, 
+        track.id, 
+        dialogData.wagonIds, 
         tripDate
       );
-      
       setIsDialogOpen(false);
-      setDialogData(null);
     } catch (error: any) {
       console.error('Error confirming move:', error);
-      setValidationError(error.message || 'Error moving wagon');
+      setValidationError(error.message || 'Error moving wagon after confirmation');
     }
   };
   

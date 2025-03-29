@@ -67,7 +67,7 @@ export async function createInternalTrip(params: CreateInternalTripParams) {
       is_planned: isPlanned,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      has_conflict: validationResult.warnings.length > 0
+      has_conflicts: validationResult.warnings.length > 0
     };
     
     const { error: tripError } = await supabase
