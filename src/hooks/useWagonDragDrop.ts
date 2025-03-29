@@ -47,7 +47,8 @@ export function useWagonDragDrop(projectId: string) {
         is_planned: isPlanned !== false, // Use provided value or default to true
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-        has_conflicts: false
+        has_conflicts: false,
+        transport_plan_file: null // Using transport_plan_file instead of file_url
       };
       
       // Use the RPC function to bypass RLS instead of direct inserts

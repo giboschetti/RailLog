@@ -1,28 +1,43 @@
-# Column Naming Issue Fix
+# Column Name Mismatch Fixes
 
-## Issue Identified
+## Issue 1: file_url vs transport_plan_file Column Name Mismatch
 
-There was a mismatch between the column names used in the database schema and the React application code:
+### Problem
+There was a mismatch between the column names used in the database schema and the SQL functions:
 
-1. In the database, the column for storing uploaded file URLs is named `transport_plan_file`.
-2. In the React app code (TripModal.tsx), it was trying to use a column named `file_url`.
+1. In the database schema, the column is named `transport_plan_file` in the `trips` table.
+2. In the React app code (specifically useWagonDragDrop.ts), it was using a null value for this field, but proper naming is needed.
+3. In the SQL functions (`create_internal_trip_v2` and others), the column was incorrectly referred to as `file_url`.
 
-This mismatch was causing the error:
+This caused the error:
 ```
-Failed to create trip: Could not find the 'file_url' column of 'trips' in the schema cache
+Failed to load resources: the server responded with a status of 400 ()
+RPC error for wagon c1d515f5-2b1f-4aea-8280-6dff27aa8d72:
+Object: {"code":"42703","details":null,"hint":null,"message":"column \"file_url\" of relation \"trips\" does not exist"}
 ```
 
-## Solution Applied
+### Solution
+We fixed this by updating both the React application code and the SQL functions to consistently use the correct column name:
 
-We fixed this by updating the React application code to use the correct column name: `transport_plan_file` instead of `file_url` in the tripData object.
-
-### Files Modified
-
-1. `src/components/projects/trips/TripModal.tsx`
+1. Updated useWagonDragDrop.ts:
    - Updated the tripData object to use `transport_plan_file` instead of `file_url`
 
-2. `src/lib/supabase.ts` 
-   - Updated the Trip type definition to reflect the correct database schema
+2. Updated SQL functions:
+   - Updated all functions in create_internal_trip_with_manual_trajectory.sql
+   - Updated all functions in fix_function_signature.sql
+   - Updated all functions in fix_transaction_handling.sql
+   - Created a new comprehensive fix_file_url_column.sql with all fixes in one place
+
+3. The fix_file_url_column.sql file contains:
+   - Updated create_internal_trip_v2 function 
+   - Updated create_internal_trip function
+   - Schema cache reload
+
+### Implementation
+Run the SQL file fix_file_url_column.sql in the Supabase SQL Editor to apply all the changes at once.
+
+### Verification
+To verify that the changes were applied correctly, drag and drop a wagon to move it to another track. The operation should now complete without errors.
 
 ## No Database Changes Required
 

@@ -1,0 +1,2017 @@
+﻿"schema_name","function_name","function_arguments","return_type","function_type","volatility","function_definition"
+"auth","email","","text","scalar","stable","CREATE OR REPLACE FUNCTION auth.email()
+ RETURNS text
+ LANGUAGE sql
+ STABLE
+AS $function$
+  select 
+  coalesce(
+    nullif(current_setting('request.jwt.claim.email', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'email')
+  )::text
+$function$
+"
+"auth","jwt","","jsonb","scalar","stable","CREATE OR REPLACE FUNCTION auth.jwt()
+ RETURNS jsonb
+ LANGUAGE sql
+ STABLE
+AS $function$
+  select 
+    coalesce(
+        nullif(current_setting('request.jwt.claim', true), ''),
+        nullif(current_setting('request.jwt.claims', true), '')
+    )::jsonb
+$function$
+"
+"auth","role","","text","scalar","stable","CREATE OR REPLACE FUNCTION auth.role()
+ RETURNS text
+ LANGUAGE sql
+ STABLE
+AS $function$
+  select 
+  coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')
+  )::text
+$function$
+"
+"auth","uid","","uuid","scalar","stable","CREATE OR REPLACE FUNCTION auth.uid()
+ RETURNS uuid
+ LANGUAGE sql
+ STABLE
+AS $function$
+  select 
+  coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+  )::uuid
+$function$
+"
+"public","add_initial_wagon_trajectory","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.add_initial_wagon_trajectory()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  v_node_id UUID;
+BEGIN
+  -- Only add a record if the wagon has a current_track_id
+  IF NEW.current_track_id IS NOT NULL THEN
+    -- Get the node_id for the track
+    SELECT node_id INTO v_node_id
+    FROM public.tracks
+    WHERE id = NEW.current_track_id;
+    
+    -- Insert the trajectory record
+    INSERT INTO public.wagon_trajectories (
+      wagon_id, 
+      track_id, 
+      node_id,
+      timestamp, 
+      move_type
+    ) VALUES (
+      NEW.id,
+      NEW.current_track_id,
+      v_node_id,
+      NOW(),
+      'initial'
+    );
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","add_wagon_trajectory_on_manual_move","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.add_wagon_trajectory_on_manual_move()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  v_node_id UUID;
+BEGIN
+  -- Only add a record if the track has actually changed
+  IF NEW.current_track_id IS DISTINCT FROM OLD.current_track_id THEN
+    -- Get the node_id for the new track
+    SELECT node_id INTO v_node_id
+    FROM public.tracks
+    WHERE id = NEW.current_track_id;
+    
+    -- Insert the trajectory record
+    INSERT INTO public.wagon_trajectories (
+      wagon_id, 
+      track_id, 
+      node_id,
+      timestamp, 
+      move_type, 
+      previous_track_id
+    ) VALUES (
+      NEW.id,
+      NEW.current_track_id,
+      v_node_id,
+      NOW(),
+      'manual',
+      OLD.current_track_id
+    );
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","add_wagon_trajectory_on_trip","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.add_wagon_trajectory_on_trip()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  v_track_id UUID;
+  v_node_id UUID;
+  v_previous_track_id UUID;
+  v_move_type VARCHAR;
+  v_timestamp TIMESTAMPTZ;
+  v_next_track_id UUID;
+BEGIN
+  -- Get the trip information - use qualified column names
+  SELECT t.type, t.datetime, t.source_track_id, t.dest_track_id 
+  INTO v_move_type, v_timestamp, v_previous_track_id, v_next_track_id
+  FROM public.trips t
+  WHERE t.id = NEW.trip_id;
+  
+  -- Determine the new track ID based on the trip type
+  IF v_move_type = 'delivery' OR v_move_type = 'internal' THEN
+    -- For deliveries and internal moves, destination is the new location
+    v_track_id := v_next_track_id;
+  ELSE
+    -- For departures, the source is the actual location (before leaving)
+    v_track_id := v_previous_track_id;
+  END IF;
+  
+  -- Get the node_id for the track
+  SELECT node_id INTO v_node_id
+  FROM public.tracks
+  WHERE id = v_track_id;
+  
+  -- Don't create a duplicate trajectory for this wagon+trip
+  IF EXISTS (
+    SELECT 1 
+    FROM public.wagon_trajectories wt
+    WHERE wt.wagon_id = NEW.wagon_id 
+    AND wt.trip_id = NEW.trip_id
+  ) THEN
+    RETURN NEW;
+  END IF;
+  
+  -- For internal trips created via drag-drop, skip trajectory creation
+  -- since the drag-drop function already creates it first
+  IF v_move_type = 'internal' AND
+     EXISTS (
+       SELECT 1 
+       FROM wagon_trajectories wt
+       WHERE wt.wagon_id = NEW.wagon_id 
+         AND wt.move_type = 'internal'
+         AND wt.previous_track_id = v_previous_track_id
+         AND wt.track_id = v_track_id
+         AND wt.timestamp = v_timestamp
+     ) 
+  THEN
+    RETURN NEW;
+  END IF;
+  
+  -- Insert the trajectory record
+  INSERT INTO public.wagon_trajectories (
+    id,
+    wagon_id, 
+    track_id, 
+    node_id,
+    timestamp, 
+    move_type, 
+    trip_id, 
+    previous_track_id,
+    next_track_id,
+    created_at,
+    updated_at
+  ) VALUES (
+    gen_random_uuid(),
+    NEW.wagon_id,
+    v_track_id,
+    v_node_id,
+    v_timestamp,
+    v_move_type,
+    NEW.trip_id,
+    -- For delivery, previous_track is NULL
+    CASE WHEN v_move_type = 'delivery' THEN NULL ELSE v_previous_track_id END,
+    -- For departure, next_track is NULL
+    CASE WHEN v_move_type = 'departure' THEN NULL ELSE v_next_track_id END,
+    NOW(),
+    NOW()
+  );
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","auto_update_trip_planned_status","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.auto_update_trip_planned_status()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- Set is_planned based on datetime compared to now
+  -- If trip datetime is in the future, it's planned
+  -- If trip datetime is in the past or present, it's executed
+  NEW.is_planned := NEW.datetime > NOW();
+  
+  -- Log for debugging
+  RAISE NOTICE 'Trip % status auto-set to is_planned=%', NEW.id, NEW.is_planned;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","can_access_data","","bool","scalar","volatile","CREATE OR REPLACE FUNCTION public.can_access_data()
+ RETURNS boolean
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  RETURN (
+    SELECT EXISTS (
+      SELECT 1 FROM public.users
+      WHERE id = auth.uid() AND (role = 'admin' OR role = 'viewer')
+    )
+  );
+END;
+$function$
+"
+"public","check_track_capacity","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.check_track_capacity()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  track_length INTEGER;
+  current_usage INTEGER;
+  track_id_to_check UUID;
+BEGIN
+  -- Determine which track_id to use for the capacity check
+  IF NEW.current_track_id IS NOT NULL THEN
+    track_id_to_check := NEW.current_track_id;
+  ELSIF NEW.track_id IS NOT NULL THEN 
+    track_id_to_check := NEW.track_id;
+  ELSE 
+    -- If no track is specified, allow the insertion
+    RETURN NEW;
+  END IF;
+
+  -- Query the track length for the selected track
+  SELECT useful_length INTO track_length FROM tracks WHERE id = track_id_to_check;
+  
+  -- Skip capacity check if track has unlimited capacity (useful_length = 0) or doesn't exist
+  IF track_length IS NULL OR track_length = 0 THEN
+    RETURN NEW;
+  END IF;
+  
+  -- Calculate current usage of the track (excluding the wagon being updated)
+  SELECT COALESCE(SUM(length), 0) INTO current_usage 
+  FROM wagons 
+  WHERE current_track_id = track_id_to_check 
+    AND id != COALESCE(NEW.id, '00000000-0000-0000-0000-000000000000');
+  
+  -- Add debug logging
+  RAISE NOTICE 'Track capacity check: track_id=%, track_length=%, current_usage=%, new_wagon_length=%, total=%', 
+    track_id_to_check, track_length, current_usage, NEW.length, current_usage + NEW.length;
+  
+  -- Check if adding the new wagon would exceed the track's capacity
+  IF current_usage + NEW.length > track_length THEN
+    RAISE EXCEPTION 'Track % capacity exceeded. Available: %m, Required: %m', 
+      track_id_to_check, track_length - current_usage, NEW.length;
+  END IF;
+
+  RETURN NEW;
+END;
+$function$
+"
+"public","clean_project_data","target_project_id uuid","void","scalar","volatile","CREATE OR REPLACE FUNCTION public.clean_project_data(target_project_id uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  -- Step 1: Remove restrictions
+  DELETE FROM restriction_tracks 
+  WHERE restriction_id IN (
+    SELECT id FROM restrictions WHERE project_id = target_project_id
+  );
+  
+  DELETE FROM restriction_nodes 
+  WHERE restriction_id IN (
+    SELECT id FROM restrictions WHERE project_id = target_project_id
+  );
+  
+  DELETE FROM restrictions WHERE project_id = target_project_id;
+  
+  -- Step 2: Remove trip_wagons for this project's trips
+  DELETE FROM trip_wagons 
+  WHERE trip_id IN (
+    SELECT id FROM trips WHERE project_id = target_project_id
+  );
+  
+  -- Step 3: Remove trips
+  DELETE FROM trips WHERE project_id = target_project_id;
+  
+  -- Step 4: Remove wagons
+  DELETE FROM wagons WHERE project_id = target_project_id;
+  
+  -- Step 5: Clean daily_restrictions if they exist
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables 
+    WHERE table_name = 'daily_restrictions'
+  ) THEN
+    DELETE FROM daily_restrictions WHERE project_id = target_project_id;
+  END IF;
+END;
+$function$
+"
+"public","cleanup_duplicate_trajectories","","text","scalar","volatile","CREATE OR REPLACE FUNCTION public.cleanup_duplicate_trajectories()
+ RETURNS text
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+DECLARE
+  deleted_count INTEGER := 0;
+  result TEXT;
+BEGIN
+  -- Delete duplicate manual movements that have the same trip_id
+  -- Keep only the latest one for each wagon_id, trip_id combination
+  WITH duplicates AS (
+    SELECT 
+      id,
+      row_number() OVER (
+        PARTITION BY wagon_id, trip_id, track_id 
+        ORDER BY created_at DESC
+      ) as rn
+    FROM wagon_trajectories
+    WHERE 
+      move_type = 'manual' 
+      AND trip_id IS NOT NULL
+  )
+  DELETE FROM wagon_trajectories wt
+  USING duplicates d
+  WHERE 
+    wt.id = d.id
+    AND d.rn > 1
+  RETURNING 1
+  INTO deleted_count;
+  
+  result := 'Deleted ' || COALESCE(deleted_count, 0) || ' duplicate trajectory records';
+  RETURN result;
+END;
+$function$
+"
+"public","create_internal_trip","trip_data json, wagon_id_param uuid","void","scalar","volatile","CREATE OR REPLACE FUNCTION public.create_internal_trip(trip_data json, wagon_id_param uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+DECLARE
+  trip_id UUID;
+  dest_track_id UUID;
+  is_planned BOOLEAN;
+BEGIN
+  -- Start a transaction
+  BEGIN
+    -- Extract trip id and destination track from the JSON data
+    trip_id := (trip_data->>'id')::UUID;
+    dest_track_id := (trip_data->>'dest_track_id')::UUID;
+    is_planned := (trip_data->>'is_planned')::BOOLEAN;
+    
+    -- Insert the trip
+    INSERT INTO trips (
+      id, 
+      type, 
+      datetime, 
+      source_track_id, 
+      dest_track_id, 
+      project_id, 
+      is_planned,
+      created_at,
+      updated_at,
+      has_conflicts,
+      construction_site_id,
+      transport_plan_file
+    ) VALUES (
+      trip_id,
+      trip_data->>'type',
+      (trip_data->>'datetime')::TIMESTAMPTZ,
+      (trip_data->>'source_track_id')::UUID,
+      dest_track_id,
+      (trip_data->>'project_id')::UUID,
+      is_planned,
+      (trip_data->>'created_at')::TIMESTAMPTZ,
+      (trip_data->>'updated_at')::TIMESTAMPTZ,
+      (trip_data->>'has_conflicts')::BOOLEAN,
+      (trip_data->>'construction_site_id')::UUID,
+      trip_data->>'transport_plan_file'
+    );
+    
+    -- Link wagon to the trip
+    INSERT INTO trip_wagons (
+      trip_id,
+      wagon_id
+    ) VALUES (
+      trip_id,
+      wagon_id_param
+    );
+    
+    -- Always update current_track_id to maintain link between wagons and tracks
+    -- This ensures the UI displays wagons correctly
+    UPDATE wagons
+    SET current_track_id = dest_track_id
+    WHERE id = wagon_id_param;
+    
+    -- Commit the transaction
+    COMMIT;
+  EXCEPTION WHEN OTHERS THEN
+    -- Rollback on any error
+    ROLLBACK;
+    RAISE;
+  END;
+END;
+$function$
+"
+"public","create_internal_trip_v2","trip_data json, wagon_id_param uuid","uuid","scalar","volatile","CREATE OR REPLACE FUNCTION public.create_internal_trip_v2(trip_data json, wagon_id_param uuid)
+ RETURNS uuid
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+DECLARE
+  v_trip_id UUID;
+  v_source_track_id UUID;
+  v_dest_track_id UUID;
+  v_is_planned BOOLEAN;
+  v_source_node_id UUID;
+  v_dest_node_id UUID;
+  v_trip_datetime TIMESTAMPTZ;
+  v_traj_id UUID;
+BEGIN
+  -- Extract data from the JSON - use v_ prefix to avoid ambiguity
+  v_trip_id := (trip_data->>'id')::UUID;
+  v_source_track_id := (trip_data->>'source_track_id')::UUID;
+  v_dest_track_id := (trip_data->>'dest_track_id')::UUID;
+  v_is_planned := (trip_data->>'is_planned')::BOOLEAN;
+  v_trip_datetime := (trip_data->>'datetime')::TIMESTAMPTZ;
+  
+  -- Get node IDs for the source and destination tracks
+  SELECT node_id INTO v_source_node_id FROM tracks WHERE id = v_source_track_id;
+  SELECT node_id INTO v_dest_node_id FROM tracks WHERE id = v_dest_track_id;
+  
+  -- Generate ID for the trajectory record 
+  v_traj_id := gen_random_uuid();
+  
+  -- First insert the trip
+  INSERT INTO trips (
+    id, 
+    type, 
+    datetime, 
+    source_track_id, 
+    dest_track_id, 
+    project_id, 
+    is_planned,
+    created_at,
+    updated_at,
+    has_conflicts,
+    construction_site_id,
+    transport_plan_file
+  ) VALUES (
+    v_trip_id,
+    trip_data->>'type',
+    v_trip_datetime,
+    v_source_track_id,
+    v_dest_track_id,
+    (trip_data->>'project_id')::UUID,
+    v_is_planned,
+    (trip_data->>'created_at')::TIMESTAMPTZ,
+    (trip_data->>'updated_at')::TIMESTAMPTZ,
+    (trip_data->>'has_conflicts')::BOOLEAN,
+    (trip_data->>'construction_site_id')::UUID,
+    trip_data->>'transport_plan_file'
+  );
+  
+  -- Delete any existing trajectory records for this wagon and trip
+  -- This ensures we don't create duplicates
+  DELETE FROM wagon_trajectories 
+  WHERE wagon_id = wagon_id_param 
+    AND trip_id = v_trip_id;
+  
+  -- Create a trajectory record for this movement
+  INSERT INTO wagon_trajectories (
+    id,
+    wagon_id,
+    track_id,
+    node_id,
+    timestamp,
+    move_type,
+    trip_id,
+    previous_track_id,
+    created_at,
+    updated_at
+  ) VALUES (
+    v_traj_id,
+    wagon_id_param,
+    v_dest_track_id,
+    v_dest_node_id,
+    v_trip_datetime,
+    'internal', -- Mark as internal movement
+    v_trip_id,  -- Set the trip_id explicitly
+    v_source_track_id,
+    NOW(),
+    NOW()
+  );
+  
+  -- Log creation
+  INSERT INTO audit_logs (
+    action, 
+    table_name, 
+    record_id, 
+    details
+  ) VALUES (
+    'DEBUG_LOG',
+    'wagon_trajectories',
+    v_traj_id,
+    jsonb_build_object(
+      'message', 'Created wagon trajectory with trip_id',
+      'trajectory_id', v_traj_id,
+      'trip_id', v_trip_id,
+      'wagon_id', wagon_id_param,
+      'track_id', v_dest_track_id,
+      'timestamp', v_trip_datetime
+    )
+  );
+  
+  -- Link wagon to the trip - AFTER creating the trajectory
+  -- This prevents triggers from creating additional trajectories
+  INSERT INTO trip_wagons (
+    trip_id,
+    wagon_id
+  ) VALUES (
+    v_trip_id,
+    wagon_id_param
+  );
+  
+  -- Update wagon's current track to maintain link
+  UPDATE wagons
+  SET current_track_id = v_dest_track_id
+  WHERE id = wagon_id_param;
+  
+  -- Ensure we don't have duplicates by cleaning up any unexpected records
+  -- that might have been created by triggers
+  WITH duplicate_trajectories AS (
+    SELECT id
+    FROM wagon_trajectories
+    WHERE 
+      wagon_id = wagon_id_param 
+      AND trip_id = v_trip_id
+      AND id != v_traj_id
+  )
+  DELETE FROM wagon_trajectories
+  WHERE id IN (SELECT id FROM duplicate_trajectories);
+  
+  -- Return the trip_id
+  RETURN v_trip_id;
+END;
+$function$
+"
+"public","create_trajectory_after_trip_wagon","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.create_trajectory_after_trip_wagon()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  v_trip_record RECORD;
+  v_wagon_record RECORD;
+  v_source_node_id UUID;
+  v_dest_node_id UUID;
+  v_move_type TEXT;
+  v_has_existing_trajectory BOOLEAN;
+BEGIN
+  -- Skip if the skip_trajectory_creation flag is set
+  IF NEW.skip_trajectory_creation = TRUE THEN
+    RETURN NEW;
+  END IF;
+
+  -- Get trip details
+  SELECT * INTO v_trip_record 
+  FROM trips 
+  WHERE id = NEW.trip_id;
+  
+  -- Get wagon details
+  SELECT * INTO v_wagon_record 
+  FROM wagons 
+  WHERE id = NEW.wagon_id;
+  
+  -- Get node IDs if tracks are specified
+  IF v_trip_record.source_track_id IS NOT NULL THEN
+    SELECT node_id INTO v_source_node_id FROM tracks WHERE id = v_trip_record.source_track_id;
+  END IF;
+  
+  IF v_trip_record.dest_track_id IS NOT NULL THEN
+    SELECT node_id INTO v_dest_node_id FROM tracks WHERE id = v_trip_record.dest_track_id;
+  END IF;
+  
+  -- Check if this wagon already has any trajectories
+  SELECT EXISTS (
+    SELECT 1 FROM wagon_trajectories 
+    WHERE wagon_id = NEW.wagon_id
+  ) INTO v_has_existing_trajectory;
+  
+  -- Determine move_type based on trip type and wagon history
+  IF v_trip_record.type = 'delivery' AND NOT v_has_existing_trajectory THEN
+    v_move_type := 'initial';
+  ELSE
+    v_move_type := v_trip_record.type;
+  END IF;
+  
+  -- Check if this wagon+trip already has a trajectory record
+  IF NOT EXISTS (
+    SELECT 1 FROM wagon_trajectories 
+    WHERE wagon_id = NEW.wagon_id 
+    AND trip_id = NEW.trip_id
+  ) THEN
+    -- Create a new trajectory record
+    INSERT INTO wagon_trajectories (
+      id,
+      wagon_id,
+      track_id,
+      node_id,
+      timestamp,
+      move_type,
+      trip_id,
+      previous_track_id,
+      created_at,
+      updated_at
+    ) VALUES (
+      gen_random_uuid(),
+      NEW.wagon_id,
+      CASE v_trip_record.type 
+        WHEN 'delivery' THEN v_trip_record.dest_track_id
+        WHEN 'departure' THEN NULL
+        ELSE v_trip_record.dest_track_id
+      END,
+      CASE v_trip_record.type 
+        WHEN 'delivery' THEN v_dest_node_id
+        WHEN 'departure' THEN NULL
+        ELSE v_dest_node_id
+      END,
+      v_trip_record.datetime,
+      v_move_type,
+      NEW.trip_id,
+      v_trip_record.source_track_id,
+      NOW(),
+      NOW()
+    );
+    
+    -- Log the trajectory creation
+    INSERT INTO audit_logs (action, table_name, record_id, details)
+    VALUES (
+      'SYSTEM_ACTION', 
+      'wagon_trajectories', 
+      NEW.wagon_id, 
+      jsonb_build_object(
+        'message', 'Created wagon trajectory record via trigger',
+        'trip_id', NEW.trip_id,
+        'wagon_id', NEW.wagon_id,
+        'trip_type', v_trip_record.type,
+        'move_type', v_move_type
+      )
+    );
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","create_trajectory_on_trip_insert","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.create_trajectory_on_trip_insert()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  node_id_val UUID;
+  prev_track_id UUID;
+BEGIN
+  -- Skip if this is a planned trip - only record trajectories for executed trips
+  IF NEW.is_planned THEN
+    RETURN NEW;
+  END IF;
+  
+  -- For internal trips
+  IF NEW.type = 'internal' AND NEW.dest_track_id IS NOT NULL AND NEW.source_track_id IS NOT NULL THEN
+    -- Get node_id for destination track
+    SELECT node_id INTO node_id_val FROM tracks WHERE id = NEW.dest_track_id;
+    
+    -- Get wagons associated with this trip
+    INSERT INTO wagon_trajectories (
+      id,
+      wagon_id,
+      track_id,
+      node_id,
+      timestamp,
+      move_type,
+      trip_id,
+      previous_track_id,
+      created_at,
+      updated_at
+    )
+    SELECT
+      gen_random_uuid(),
+      tw.wagon_id,
+      NEW.dest_track_id,
+      node_id_val,
+      NEW.datetime,
+      'internal',
+      NEW.id,
+      NEW.source_track_id,
+      NOW(),
+      NOW()
+    FROM
+      trip_wagons tw
+    WHERE
+      tw.trip_id = NEW.id
+    AND NOT EXISTS (
+      -- Don't create duplicates
+      SELECT 1 FROM wagon_trajectories wt 
+      WHERE wt.wagon_id = tw.wagon_id 
+      AND wt.trip_id = NEW.id
+    );
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","create_trip","trip_data json, wagon_ids json","uuid","scalar","volatile","CREATE OR REPLACE FUNCTION public.create_trip(trip_data json, wagon_ids json)
+ RETURNS uuid
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+DECLARE
+  trip_id UUID;
+  source_track_id UUID;
+  dest_track_id UUID;
+  trip_type TEXT;
+  trip_datetime TIMESTAMPTZ;
+  wagon_id UUID;
+  wagon_json json;
+  source_node_id UUID;
+  dest_node_id UUID;
+  i INT;
+  wagon_array json[];
+BEGIN
+  -- Extract trip data
+  trip_id := (trip_data->>'id')::UUID;
+  trip_type := trip_data->>'type';
+  trip_datetime := (trip_data->>'datetime')::TIMESTAMPTZ;
+  source_track_id := (trip_data->>'source_track_id')::UUID;
+  dest_track_id := (trip_data->>'dest_track_id')::UUID;
+  
+  -- Get node IDs if tracks are specified
+  IF source_track_id IS NOT NULL THEN
+    SELECT node_id INTO source_node_id FROM tracks WHERE id = source_track_id;
+  END IF;
+  
+  IF dest_track_id IS NOT NULL THEN
+    SELECT node_id INTO dest_node_id FROM tracks WHERE id = dest_track_id;
+  END IF;
+  
+  -- Insert the trip
+  INSERT INTO trips (
+    id, 
+    type, 
+    datetime, 
+    source_track_id, 
+    dest_track_id, 
+    transport_plan_number,
+    is_planned,
+    project_id,
+    transport_plan_file
+  ) VALUES (
+    trip_id,
+    trip_type,
+    trip_datetime,
+    source_track_id,
+    dest_track_id,
+    trip_data->>'transport_plan_number',
+    COALESCE((trip_data->>'is_planned')::BOOLEAN, TRUE),
+    (trip_data->>'project_id')::UUID,
+    trip_data->>'transport_plan_file'
+  );
+
+  -- Process each wagon
+  wagon_array := array_elements(wagon_ids);
+  FOR i IN 0..array_length(wagon_array, 1)-1 LOOP
+    wagon_json := wagon_array[i];
+    wagon_id := (wagon_json->>'id')::UUID;
+    
+    -- Link wagon to trip
+    INSERT INTO trip_wagons (trip_id, wagon_id)
+    VALUES (trip_id, wagon_id);
+    
+    -- Create trajectory record (with proper trip_id link)
+    INSERT INTO wagon_trajectories (
+      id,
+      wagon_id,
+      track_id,
+      node_id,
+      timestamp,
+      move_type,
+      trip_id,  -- IMPORTANT: Set trip_id reference
+      previous_track_id,
+      created_at,
+      updated_at
+    ) VALUES (
+      gen_random_uuid(),
+      wagon_id,
+      CASE trip_type 
+        WHEN 'delivery' THEN dest_track_id
+        WHEN 'departure' THEN NULL
+        ELSE NULL
+      END,
+      CASE trip_type 
+        WHEN 'delivery' THEN dest_node_id
+        WHEN 'departure' THEN NULL
+        ELSE NULL
+      END,
+      trip_datetime,
+      CASE 
+        WHEN trip_type = 'delivery' AND (SELECT COUNT(*) FROM wagon_trajectories WHERE wagon_id = wagon_id) = 0 THEN 'initial'
+        ELSE trip_type
+      END,
+      trip_id,  -- Link to trip
+      source_track_id,
+      NOW(),
+      NOW()
+    );
+    
+    -- For delivery, update wagon's current track to destination
+    IF trip_type = 'delivery' THEN
+      UPDATE wagons
+      SET current_track_id = dest_track_id
+      WHERE id = wagon_id;
+    END IF;
+  END LOOP;
+
+  RETURN trip_id;
+END;
+$function$
+"
+"public","create_wagon_trajectory_after_trip","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.create_wagon_trajectory_after_trip()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    IF NEW.is_planned = FALSE THEN
+        -- Insert new trajectory records
+        INSERT INTO wagon_trajectories (
+            id, wagon_id, track_id, node_id, timestamp, move_type, trip_id, 
+            previous_track_id, next_track_id, created_at, updated_at
+        )
+        SELECT 
+            gen_random_uuid(), 
+            tw.wagon_id,
+            CASE WHEN NEW.type = 'departure' THEN NEW.source_track_id ELSE NEW.dest_track_id END,
+            CASE WHEN NEW.type = 'departure' THEN 
+                (SELECT node_id FROM tracks WHERE id = NEW.source_track_id)
+            ELSE
+                (SELECT node_id FROM tracks WHERE id = NEW.dest_track_id)
+            END,
+            NEW.datetime, -- Always use the trip's datetime
+            CASE 
+                -- For delivery trips, create a combined delivery/initial record if no history
+                WHEN NEW.type = 'delivery' AND NOT EXISTS (
+                    SELECT 1 FROM wagon_trajectories
+                    WHERE wagon_id = tw.wagon_id
+                ) THEN 'delivery'
+                ELSE NEW.type
+            END,
+            NEW.id,
+            CASE WHEN NEW.type = 'delivery' THEN NULL ELSE NEW.source_track_id END,
+            CASE WHEN NEW.type = 'departure' THEN NULL ELSE NEW.dest_track_id END,
+            NOW(),
+            NOW()
+        FROM 
+            trip_wagons tw
+        WHERE 
+            tw.trip_id = NEW.id
+        AND NOT EXISTS (
+            SELECT 1 FROM wagon_trajectories wt
+            WHERE wt.wagon_id = tw.wagon_id 
+            AND wt.trip_id = NEW.id
+        );
+        
+        -- Update existing records based on trip type
+        
+        -- 1. For delivery trips - update initial records
+        IF NEW.type = 'delivery' THEN
+            UPDATE wagon_trajectories wt
+            SET 
+                timestamp = NEW.datetime,
+                updated_at = NOW()
+            FROM trip_wagons tw
+            WHERE 
+                tw.trip_id = NEW.id AND
+                tw.wagon_id = wt.wagon_id AND
+                wt.move_type = 'initial';
+        END IF;
+        
+        -- 2. For internal trips - update internal records
+        IF NEW.type = 'internal' THEN
+            UPDATE wagon_trajectories wt
+            SET 
+                timestamp = NEW.datetime,
+                trip_id = NEW.id,
+                updated_at = NOW()
+            FROM trip_wagons tw
+            WHERE 
+                tw.trip_id = NEW.id AND
+                tw.wagon_id = wt.wagon_id AND
+                wt.move_type = 'internal' AND
+                (wt.trip_id IS NULL OR wt.trip_id != NEW.id) AND
+                wt.previous_track_id = NEW.source_track_id AND
+                wt.track_id = NEW.dest_track_id;
+        END IF;
+        
+        -- 3. For any trip type - update related manual movements
+        UPDATE wagon_trajectories wt
+        SET 
+            timestamp = NEW.datetime,
+            trip_id = NEW.id,
+            updated_at = NOW()
+        FROM trip_wagons tw
+        WHERE 
+            tw.trip_id = NEW.id AND
+            tw.wagon_id = wt.wagon_id AND
+            wt.move_type = 'manual' AND
+            (wt.trip_id IS NULL OR wt.trip_id != NEW.id) AND
+            (
+                (wt.previous_track_id = NEW.source_track_id AND wt.track_id = NEW.dest_track_id) OR
+                (wt.track_id = NEW.dest_track_id AND NEW.type = 'delivery')
+            ) AND
+            -- Only update manual records that are close in time to the trip (within 24 hours)
+            ABS(EXTRACT(EPOCH FROM (NEW.datetime - wt.timestamp))) < 24*60*60;
+    END IF;
+    RETURN NEW;
+END;
+$function$
+"
+"public","ensure_wagon_track_updated_after_trip","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.ensure_wagon_track_updated_after_trip()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- Update for all trips with a destination track, regardless of planned status
+  IF NEW.dest_track_id IS NOT NULL THEN
+    -- Log the trip we're processing
+    RAISE NOTICE 'Ensuring wagon locations for trip % (planned status: %)', NEW.id, NEW.is_planned;
+    
+    -- Check for any wagons that need their current_track_id updated
+    UPDATE wagons
+    SET 
+      current_track_id = NEW.dest_track_id,
+      updated_at = NOW()
+    WHERE 
+      id IN (SELECT wagon_id FROM trip_wagons WHERE trip_id = NEW.id)
+      AND (current_track_id IS NULL OR current_track_id != NEW.dest_track_id);
+    
+    -- Log how many wagons were updated
+    RAISE NOTICE 'Trip %: Ensured wagon locations on track %', NEW.id, NEW.dest_track_id;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","exec_sql","sql text","void","scalar","volatile","CREATE OR REPLACE FUNCTION public.exec_sql(sql text)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  EXECUTE sql;
+END;
+$function$
+"
+"public","expand_restriction_to_daily","restriction_id uuid, project_id uuid, start_datetime timestamp with time zone, end_datetime timestamp with time zone, repetition_pattern text, restriction_type text, track_ids uuid[], comment text DEFAULT NULL::text","int4","scalar","volatile","CREATE OR REPLACE FUNCTION public.expand_restriction_to_daily(restriction_id uuid, project_id uuid, start_datetime timestamp with time zone, end_datetime timestamp with time zone, repetition_pattern text, restriction_type text, track_ids uuid[], comment text DEFAULT NULL::text)
+ RETURNS integer
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  start_date DATE;
+  end_date DATE;
+  curr_date DATE;
+  time_from TIME;
+  time_to TIME;
+  days_count INTEGER := 0;
+  inserted_count INTEGER := 0;
+BEGIN
+  -- Get date and time parts
+  start_date := DATE(start_datetime);
+  end_date := DATE(end_datetime);
+  
+  -- For once pattern, generate a record for each day
+  IF repetition_pattern = 'once' THEN
+    curr_date := start_date;
+    
+    WHILE curr_date <= end_date LOOP
+      -- Set time ranges - full day for middle days, partial for first/last
+      IF curr_date = start_date THEN
+        time_from := start_datetime::TIME;
+      ELSE
+        time_from := '00:00:00'::TIME;
+      END IF;
+      
+      IF curr_date = end_date THEN
+        time_to := end_datetime::TIME;
+      ELSE
+        time_to := '23:59:59'::TIME;
+      END IF;
+      
+      -- Insert the daily record
+      INSERT INTO public.daily_restrictions (
+        original_restriction_id,
+        project_id,
+        restriction_date,
+        time_from,
+        time_to,
+        type,
+        betroffene_gleise,
+        comment
+      ) VALUES (
+        restriction_id,
+        project_id,
+        curr_date,
+        time_from,
+        time_to,
+        restriction_type,
+        track_ids,
+        comment
+      );
+      
+      inserted_count := inserted_count + 1;
+      curr_date := curr_date + INTERVAL '1 day';
+      days_count := days_count + 1;
+    END LOOP;
+    
+  -- For daily pattern, just create one record with the time range
+  ELSIF repetition_pattern = 'daily' THEN
+    INSERT INTO public.daily_restrictions (
+      original_restriction_id,
+      project_id,
+      restriction_date,
+      time_from,
+      time_to,
+      type,
+      betroffene_gleise,
+      comment
+    ) VALUES (
+      restriction_id,
+      project_id,
+      start_date,
+      start_datetime::TIME,
+      end_datetime::TIME,
+      restriction_type,
+      track_ids,
+      comment
+    );
+    
+    inserted_count := 1;
+  END IF;
+  
+  RETURN inserted_count;
+END;
+$function$
+"
+"public","fill_restriction_type","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.fill_restriction_type()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- If type is NULL but restriction_types has a value, use the first value from restriction_types
+  IF NEW.type IS NULL AND NEW.restriction_types IS NOT NULL THEN
+    -- If restriction_types is an array, get first element
+    IF NEW.restriction_types LIKE '[%]' THEN
+      NEW.type = TRIM(BOTH '"' FROM SPLIT_PART(REPLACE(REPLACE(NEW.restriction_types, '[', ''), ']', ''), ',', 1));
+    -- Otherwise use as-is
+    ELSE
+      NEW.type = NEW.restriction_types;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$function$
+"
+"public","get_track_occupancy","track_id_param uuid, timestamp_param timestamp with time zone DEFAULT now()","json","scalar","volatile","CREATE OR REPLACE FUNCTION public.get_track_occupancy(track_id_param uuid, timestamp_param timestamp with time zone DEFAULT now())
+ RETURNS json
+ LANGUAGE plpgsql
+AS $function$
+        DECLARE
+            track_rec RECORD;
+            total_length NUMERIC := 0;
+            occupied_length NUMERIC := 0;
+            available_length NUMERIC := 0;
+            wagon_count INTEGER := 0;
+            result JSON;
+        BEGIN
+            -- Get basic track info using useful_length
+            BEGIN
+                SELECT id, useful_length INTO STRICT track_rec
+                FROM tracks
+                WHERE id = track_id_param;
+                
+                -- Use useful_length
+                total_length := COALESCE(track_rec.useful_length, 0);
+            EXCEPTION WHEN no_data_found THEN
+                -- No track found
+                NULL;
+            END;
+            
+            -- Simplest possible query for wagons
+            BEGIN
+                SELECT COUNT(id) INTO wagon_count
+                FROM wagons
+                WHERE track_id = track_id_param;
+            EXCEPTION WHEN OTHERS THEN
+                wagon_count := 0;
+            END;
+            
+            -- Create a simple result
+            result := json_build_object(
+                'track_id', track_id_param,
+                'datetime', timestamp_param,
+                'total_length', total_length,
+                'occupied_length', occupied_length,
+                'available_length', total_length,
+                'wagon_count', wagon_count
+            );
+            
+            RETURN result;
+        END;
+        $function$
+"
+"public","get_track_occupancy_at_time","track_id_param uuid, time_point timestamp with time zone","json","scalar","volatile","CREATE OR REPLACE FUNCTION public.get_track_occupancy_at_time(track_id_param uuid, time_point timestamp with time zone)
+ RETURNS json
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  track_data RECORD;
+  total_length INTEGER;
+  occupied_length INTEGER;
+  available_length INTEGER;
+  wagon_count INTEGER;
+  result JSON;
+BEGIN
+  -- Get track details
+  SELECT * INTO track_data FROM tracks WHERE id = track_id_param;
+  
+  IF NOT FOUND THEN
+    RETURN json_build_object(
+      'success', false,
+      'error', 'Track not found'
+    );
+  END IF;
+  
+  total_length := track_data.useful_length;
+  
+  -- Calculate occupied length from wagons on this track at the specified time
+  SELECT 
+    COUNT(wagon_id),
+    COALESCE(SUM(length), 0)
+  INTO 
+    wagon_count,
+    occupied_length
+  FROM get_track_wagons_at_time(track_id_param, time_point);
+  
+  -- Calculate available length
+  IF total_length > 0 THEN
+    available_length := GREATEST(0, total_length - occupied_length);
+  ELSE
+    -- If track has no length limit (useful_length = 0), it has infinite capacity
+    available_length := 9999999;
+  END IF;
+  
+  -- Create result object
+  result := json_build_object(
+    'track_id', track_id_param,
+    'track_name', track_data.name,
+    'node_id', track_data.node_id,
+    'total_length', total_length,
+    'occupied_length', occupied_length,
+    'available_length', available_length,
+    'usage_percentage', CASE WHEN total_length > 0 THEN (occupied_length::float / total_length * 100) ELSE 0 END,
+    'wagon_count', wagon_count,
+    'datetime', time_point
+  );
+  
+  RETURN result;
+END;
+$function$
+"
+"public","get_track_wagons_at_time","track_id_param uuid, time_point timestamp with time zone","record","set-returning","volatile","CREATE OR REPLACE FUNCTION public.get_track_wagons_at_time(track_id_param uuid, time_point timestamp with time zone)
+ RETURNS TABLE(wagon_id uuid, number text, length integer, content text, project_id uuid, construction_site_id uuid, type_id uuid, arrival_time timestamp with time zone, wagon_type text)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  RETURN QUERY
+  WITH relevant_trips AS (
+    -- Get the latest trip for each wagon that happened before or at the selected time
+    SELECT DISTINCT ON (tw.wagon_id)
+      tw.wagon_id,
+      t.dest_track_id,
+      t.datetime AS arrival_time,
+      t.type
+    FROM trip_wagons tw
+    JOIN trips t ON tw.trip_id = t.id
+    WHERE 
+      t.datetime <= time_point
+      AND t.dest_track_id IS NOT NULL
+      AND t.type IN ('delivery', 'internal')
+    ORDER BY tw.wagon_id, t.datetime DESC
+  ),
+  departures AS (
+    -- Find wagons that were later removed by departure trips
+    SELECT DISTINCT ON (tw.wagon_id)
+      tw.wagon_id,
+      t.datetime AS departure_time,
+      t.type
+    FROM trip_wagons tw
+    JOIN trips t ON tw.trip_id = t.id
+    WHERE 
+      t.datetime <= time_point
+      AND t.type = 'departure'
+    ORDER BY tw.wagon_id, t.datetime DESC
+  )
+  SELECT 
+    w.id AS wagon_id,
+    w.number,
+    w.length,
+    w.content,
+    w.project_id,
+    w.construction_site_id,
+    w.type_id,
+    rt.arrival_time,
+    COALESCE(wt.name, w.custom_type) AS wagon_type
+  FROM wagons w
+  JOIN relevant_trips rt ON w.id = rt.wagon_id
+  LEFT JOIN departures d ON w.id = d.wagon_id
+  LEFT JOIN wagon_types wt ON w.type_id = wt.id
+  WHERE 
+    rt.dest_track_id = track_id_param
+    AND (d.wagon_id IS NULL OR d.departure_time < rt.arrival_time);
+END;
+$function$
+"
+"public","get_wagons_at_time","time_point timestamp with time zone","record","set-returning","volatile","CREATE OR REPLACE FUNCTION public.get_wagons_at_time(time_point timestamp with time zone)
+ RETURNS TABLE(wagon_id uuid, track_id uuid, track_name text, node_id uuid, node_name text, number text, wagon_length integer, content text, project_id uuid, construction_site_id uuid, arrival_time timestamp with time zone)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  RETURN QUERY
+  WITH relevant_trips AS (
+    -- Get the latest trip for each wagon that happened before or at the selected time
+    SELECT DISTINCT ON (tw.wagon_id)
+      tw.wagon_id,
+      t.dest_track_id,
+      t.datetime AS arrival_time,
+      t.type
+    FROM trip_wagons tw
+    JOIN trips t ON tw.trip_id = t.id
+    WHERE 
+      t.datetime <= time_point
+      AND t.dest_track_id IS NOT NULL  -- Only include trips with a destination
+      AND t.type IN ('delivery', 'internal')  -- Only include trips that place wagons on tracks
+    ORDER BY tw.wagon_id, t.datetime DESC
+  ),
+  departures AS (
+    -- Find wagons that were later removed by departure trips
+    SELECT DISTINCT ON (tw.wagon_id)
+      tw.wagon_id,
+      t.datetime AS departure_time,
+      t.type
+    FROM trip_wagons tw
+    JOIN trips t ON tw.trip_id = t.id
+    WHERE 
+      t.datetime <= time_point
+      AND t.type = 'departure'  -- Only include departure trips
+    ORDER BY tw.wagon_id, t.datetime DESC
+  )
+  SELECT 
+    w.id AS wagon_id,
+    rt.dest_track_id AS track_id,
+    tr.name AS track_name,
+    tr.node_id,
+    n.name AS node_name,
+    w.number,
+    w.length AS wagon_length,
+    w.content,
+    w.project_id,
+    w.construction_site_id,
+    rt.arrival_time
+  FROM wagons w
+  JOIN relevant_trips rt ON w.id = rt.wagon_id
+  JOIN tracks tr ON rt.dest_track_id = tr.id
+  JOIN nodes n ON tr.node_id = n.id
+  LEFT JOIN departures d ON w.id = d.wagon_id
+  WHERE 
+    -- Only include wagons that haven't been departed after their last arrival
+    d.wagon_id IS NULL OR d.departure_time < rt.arrival_time;
+END;
+$function$
+"
+"public","get_wagons_by_current_track","track_id_param uuid","record","set-returning","volatile","CREATE OR REPLACE FUNCTION public.get_wagons_by_current_track(track_id_param uuid)
+ RETURNS TABLE(wagon_id uuid, track_id uuid, number text, length integer, content text, project_id uuid, construction_site_id uuid, wagon_type text)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    w.id as wagon_id,
+    w.current_track_id as track_id,
+    w.number,
+    w.length,
+    w.content,
+    w.project_id,
+    w.construction_site_id,
+    COALESCE(wt.name, w.custom_type) as wagon_type
+  FROM 
+    wagons w
+  LEFT JOIN
+    wagon_types wt ON w.type_id = wt.id
+  WHERE 
+    w.current_track_id = track_id_param;
+END;
+$function$
+"
+"public","handle_new_user","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.handle_new_user()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  INSERT INTO public.users (id, email, role)
+  VALUES (
+    NEW.id, 
+    NEW.email, 
+    COALESCE(NEW.raw_user_meta_data->>'role', 'viewer')
+  );
+  RETURN NEW;
+END;
+$function$
+"
+"public","handle_trip_deletion","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.handle_trip_deletion()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  wagon_id_val UUID;
+  trip_type_val TEXT;
+  trajectory_record RECORD;
+  previous_track_id UUID;
+BEGIN
+  -- Log trip deletion for diagnostic purposes
+  INSERT INTO audit_logs (action, table_name, record_id, details)
+  VALUES ('DELETE', 'trips', OLD.id, json_build_object(
+    'trip_type', OLD.type,
+    'datetime', OLD.datetime
+  ));
+  
+  -- Store trip type for easier access
+  trip_type_val := OLD.type;
+  
+  -- For each wagon from the deleted trip's trajectories
+  FOR wagon_id_val IN 
+    SELECT DISTINCT wagon_id FROM wagon_trajectories 
+    WHERE trip_id = OLD.id
+  LOOP
+    BEGIN -- Begin inner exception block
+      -- Find the most recent trajectory record before this trip
+      -- This is where the wagon was before this trip
+      SELECT * INTO trajectory_record
+      FROM wagon_trajectories
+      WHERE 
+        wagon_id = wagon_id_val AND
+        trip_id != OLD.id AND
+        timestamp < OLD.datetime
+      ORDER BY timestamp DESC
+      LIMIT 1;
+      
+      -- For delivery or internal trips, revert the wagon's current_track_id to where it was before
+      IF trip_type_val IN ('delivery', 'internal') THEN
+        IF trajectory_record.id IS NOT NULL THEN
+          -- Found a previous trajectory, use its track_id
+          previous_track_id := trajectory_record.track_id;
+          
+          -- Update the wagon's current location to where it was before this trip
+          UPDATE wagons
+          SET current_track_id = previous_track_id
+          WHERE id = wagon_id_val;
+          
+          -- Log the reversion to the previous track
+          INSERT INTO audit_logs (action, table_name, record_id, details)
+          VALUES ('UPDATE', 'wagons', wagon_id_val, json_build_object(
+            'current_track_id', previous_track_id,
+            'reason', 'Trip deletion reversion'
+          ));
+        ELSE
+          -- If this was a delivery trip and no previous trajectory found
+          -- then the wagon shouldn't exist in the system
+          IF trip_type_val = 'delivery' THEN
+            -- For a delivery trip with no prior history, update to NULL
+            UPDATE wagons
+            SET current_track_id = NULL
+            WHERE id = wagon_id_val;
+            
+            -- Also create a trajectory record showing this removal
+            INSERT INTO wagon_trajectories
+              (wagon_id, track_id, move_type, timestamp)
+            VALUES
+              (wagon_id_val, NULL, 'removal', NOW());
+            
+            -- Log the wagon removal due to trip deletion
+            INSERT INTO audit_logs (action, table_name, record_id, details)
+            VALUES ('UPDATE', 'wagons', wagon_id_val, json_build_object(
+              'current_track_id', NULL,
+              'reason', 'Delivery trip deletion'
+            ));
+          END IF;
+        END IF;
+      END IF;
+      
+      -- Mark the trip's trajectory records as no longer associated with the deleted trip
+      -- This keeps the trajectory history but disassociates it from the deleted trip
+      UPDATE wagon_trajectories
+      SET trip_id = NULL
+      WHERE trip_id = OLD.id AND wagon_id = wagon_id_val;
+      
+      -- Log the trajectory disassociation
+      INSERT INTO audit_logs (action, table_name, record_id, details)
+      VALUES ('UPDATE', 'wagon_trajectories', wagon_id_val, json_build_object(
+        'trip_id', NULL,
+        'reason', 'Trip deletion disassociation'
+      ));
+      
+    EXCEPTION WHEN OTHERS THEN
+      -- Log any errors that occur during processing of a specific wagon
+      INSERT INTO audit_logs (action, table_name, record_id, details)
+      VALUES ('ERROR', 'wagon_trajectories', wagon_id_val, json_build_object(
+        'error', SQLERRM,
+        'trip_id', OLD.id
+      ));
+      -- Continue with the next wagon despite the error
+    END;
+  END LOOP;
+  
+  RETURN OLD;
+EXCEPTION WHEN OTHERS THEN
+  -- Log any errors at the function level
+  INSERT INTO audit_logs (action, table_name, record_id, details)
+  VALUES ('ERROR', 'trips', OLD.id, json_build_object(
+    'error', SQLERRM,
+    'context', 'handle_trip_deletion trigger function'
+  ));
+  
+  -- Always return OLD to allow deletion to proceed even if cleanup fails
+  RETURN OLD;
+END;
+$function$
+"
+"public","is_admin","","bool","scalar","volatile","CREATE OR REPLACE FUNCTION public.is_admin()
+ RETURNS boolean
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  RETURN (
+    SELECT EXISTS (
+      SELECT 1 FROM public.users
+      WHERE id = auth.uid() AND role = 'admin'
+    )
+  );
+END;
+$function$
+"
+"public","prevent_duplicate_trajectories","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.prevent_duplicate_trajectories()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  -- Check if there's already a matching trajectory for this wagon and trip
+  IF TG_OP = 'INSERT' AND NEW.trip_id IS NOT NULL THEN
+    IF EXISTS (
+      SELECT 1 FROM wagon_trajectories 
+      WHERE 
+        wagon_id = NEW.wagon_id 
+        AND trip_id = NEW.trip_id
+        AND track_id = NEW.track_id
+        AND id != NEW.id
+    ) THEN
+      RAISE NOTICE 'Duplicate trajectory detected for wagon_id % and trip_id %', NEW.wagon_id, NEW.trip_id;
+      -- Instead of blocking, we could update the existing record or delete older ones
+      -- For now, just log the issue and allow it
+    END IF;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","prevent_duplicate_wagon_in_trip","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.prevent_duplicate_wagon_in_trip()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  wagon_number TEXT;
+  source_track_id UUID;
+  dest_track_id UUID;
+BEGIN
+  -- Get the wagon number
+  SELECT number INTO wagon_number FROM wagons WHERE id = NEW.wagon_id;
+  
+  -- Only proceed if the wagon has a number
+  IF wagon_number IS NOT NULL THEN
+    -- Get the source and destination track IDs for this trip
+    SELECT t.source_track_id, t.dest_track_id 
+    INTO source_track_id, dest_track_id
+    FROM trips t
+    WHERE t.id = NEW.trip_id;
+    
+    -- Check if the same wagon number is already on the destination track
+    IF EXISTS (
+      SELECT 1 FROM wagons 
+      WHERE id != NEW.wagon_id 
+      AND number = wagon_number
+      AND current_track_id = dest_track_id
+    ) THEN
+      RAISE EXCEPTION 'Der Waggon (%) befindet sich bereits auf dem Zielgleis', wagon_number;
+    END IF;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","prevent_duplicate_wagon_placement","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.prevent_duplicate_wagon_placement()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- Only check if this wagon has a number (wagons without numbers are allowed to be duplicated)
+  IF NEW.number IS NOT NULL THEN
+    -- Check if the same wagon number already exists on a different track
+    IF EXISTS (
+      SELECT 1 FROM wagons 
+      WHERE id != NEW.id 
+      AND number = NEW.number
+      AND current_track_id IS NOT NULL
+      AND current_track_id != COALESCE(NEW.current_track_id, '00000000-0000-0000-0000-000000000000'::UUID)
+    ) THEN
+      RAISE EXCEPTION 'Der Waggon (%) befindet sich bereits auf einem anderen Gleis', NEW.number;
+    END IF;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","process_trip","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.process_trip()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- For deliveries and internal moves (arriving at a track)
+  IF NEW.dest_track_id IS NOT NULL AND NEW.is_planned = false THEN
+    -- For each wagon in this trip, create a new location record
+    INSERT INTO wagon_locations (
+      wagon_id,
+      track_id,
+      arrival_trip_id,
+      arrival_time
+    )
+    SELECT
+      tw.wagon_id,
+      NEW.dest_track_id,
+      NEW.id,
+      NEW.datetime
+    FROM
+      trip_wagons tw
+    WHERE
+      tw.trip_id = NEW.id;
+      
+    -- Update current location in wagons table
+    UPDATE wagons
+    SET track_id = NEW.dest_track_id
+    WHERE id IN (
+      SELECT wagon_id FROM trip_wagons WHERE trip_id = NEW.id
+    );
+  END IF;
+  
+  -- For departures and internal moves (leaving a track)
+  IF NEW.source_track_id IS NOT NULL AND NEW.is_planned = false THEN
+    -- Update departure time for existing location records
+    UPDATE wagon_locations wl
+    SET 
+      departure_time = NEW.datetime,
+      departure_trip_id = NEW.id
+    FROM
+      trip_wagons tw
+    WHERE
+      tw.trip_id = NEW.id
+      AND tw.wagon_id = wl.wagon_id
+      AND wl.track_id = NEW.source_track_id
+      AND wl.departure_time IS NULL;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","update_all_trip_planned_statuses","","void","scalar","volatile","CREATE OR REPLACE FUNCTION public.update_all_trip_planned_statuses()
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  updated_count INTEGER;
+BEGIN
+  -- Update all trips where the datetime has passed but is_planned is still true
+  UPDATE trips
+  SET 
+    is_planned = false,
+    updated_at = NOW()
+  WHERE 
+    datetime <= NOW() 
+    AND is_planned = true;
+  
+  GET DIAGNOSTICS updated_count = ROW_COUNT;
+  RAISE NOTICE 'Updated % trips from planned to executed based on datetime', updated_count;
+END;
+$function$
+"
+"public","update_timestamp","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.update_timestamp()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$function$
+"
+"public","update_updated_at_column","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.update_updated_at_column()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$function$
+"
+"public","update_wagon_location","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.update_wagon_location()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- For each wagon in this trip, update its location
+  IF NEW.dest_track_id IS NOT NULL THEN
+    -- Note: Change "length" to "useful_length" here
+    -- The original query was: SELECT length FROM tracks WHERE id = NEW.dest_track_id
+    
+    UPDATE wagons
+    SET track_id = NEW.dest_track_id
+    WHERE id IN (
+      SELECT wagon_id FROM trip_wagons WHERE trip_id = NEW.id
+    );
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","update_wagon_location_after_trip","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.update_wagon_location_after_trip()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- Only update if this is an executed trip (not planned) and has a destination track
+  IF NOT NEW.is_planned AND NEW.dest_track_id IS NOT NULL THEN
+    -- Log the trip we're processing
+    RAISE NOTICE 'Updating wagon locations for trip % (% wagons)', 
+      NEW.id, 
+      (SELECT COUNT(*) FROM trip_wagons WHERE trip_id = NEW.id);
+    
+    -- Update the current_track_id for all wagons in this trip
+    UPDATE wagons
+    SET 
+      current_track_id = NEW.dest_track_id,
+      updated_at = NOW()
+    WHERE id IN (
+      SELECT wagon_id FROM trip_wagons WHERE trip_id = NEW.id
+    );
+    
+    -- Log how many wagons were updated
+    RAISE NOTICE 'Updated % wagons to track %', 
+      (SELECT COUNT(*) FROM wagons WHERE current_track_id = NEW.dest_track_id AND id IN (SELECT wagon_id FROM trip_wagons WHERE trip_id = NEW.id)),
+      NEW.dest_track_id;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"public","validate_trip","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION public.validate_trip()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  source_node_id UUID;
+  dest_node_id UUID;
+  restriction_count INTEGER;
+BEGIN
+  -- Get nodes for source and destination tracks
+  IF NEW.source_track_id IS NOT NULL THEN
+    SELECT node_id INTO source_node_id FROM tracks WHERE id = NEW.source_track_id;
+  END IF;
+  
+  IF NEW.dest_track_id IS NOT NULL THEN
+    SELECT node_id INTO dest_node_id FROM tracks WHERE id = NEW.dest_track_id;
+  END IF;
+  
+  -- Check for restrictions if it's a departure
+  IF NEW.type = 'departure' AND NEW.source_track_id IS NOT NULL THEN
+    SELECT COUNT(*) INTO restriction_count
+    FROM restrictions r
+    LEFT JOIN restriction_nodes rn ON r.id = rn.restriction_id
+    LEFT JOIN restriction_tracks rt ON r.id = rt.restriction_id
+    WHERE 
+      r.type = 'no_exit' AND
+      NEW.datetime BETWEEN r.from_datetime AND r.to_datetime AND
+      (
+        rt.track_id = NEW.source_track_id OR
+        rn.node_id = source_node_id
+      );
+      
+    IF restriction_count > 0 THEN
+      RAISE WARNING 'This trip conflicts with existing exit restrictions';
+      -- We'll allow it but flag it as problematic
+    END IF;
+  END IF;
+  
+  -- Check for restrictions if it's a delivery
+  IF NEW.type = 'delivery' AND NEW.dest_track_id IS NOT NULL THEN
+    SELECT COUNT(*) INTO restriction_count
+    FROM restrictions r
+    LEFT JOIN restriction_nodes rn ON r.id = rn.restriction_id
+    LEFT JOIN restriction_tracks rt ON r.id = rt.restriction_id
+    WHERE 
+      r.type = 'no_entry' AND
+      NEW.datetime BETWEEN r.from_datetime AND r.to_datetime AND
+      (
+        rt.track_id = NEW.dest_track_id OR
+        rn.node_id = dest_node_id
+      );
+      
+    IF restriction_count > 0 THEN
+      RAISE WARNING 'This trip conflicts with existing entry restrictions';
+      -- We'll allow it but flag it as problematic
+    END IF;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+"
+"storage","can_insert_object","bucketid text, name text, owner uuid, metadata jsonb","void","scalar","volatile","CREATE OR REPLACE FUNCTION storage.can_insert_object(bucketid text, name text, owner uuid, metadata jsonb)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  INSERT INTO "storage"."objects" ("bucket_id", "name", "owner", "metadata") VALUES (bucketid, name, owner, metadata);
+  -- hack to rollback the successful insert
+  RAISE sqlstate 'PT200' using
+  message = 'ROLLBACK',
+  detail = 'rollback successful insert';
+END
+$function$
+"
+"storage","extension","name text","text","scalar","volatile","CREATE OR REPLACE FUNCTION storage.extension(name text)
+ RETURNS text
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+_parts text[];
+_filename text;
+BEGIN
+	select string_to_array(name, '/') into _parts;
+	select _parts[array_length(_parts,1)] into _filename;
+	-- @todo return the last part instead of 2
+	return reverse(split_part(reverse(_filename), '.', 1));
+END
+$function$
+"
+"storage","filename","name text","text","scalar","volatile","CREATE OR REPLACE FUNCTION storage.filename(name text)
+ RETURNS text
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+_parts text[];
+BEGIN
+	select string_to_array(name, '/') into _parts;
+	return _parts[array_length(_parts,1)];
+END
+$function$
+"
+"storage","foldername","name text","_text","scalar","volatile","CREATE OR REPLACE FUNCTION storage.foldername(name text)
+ RETURNS text[]
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+_parts text[];
+BEGIN
+	select string_to_array(name, '/') into _parts;
+	return _parts[1:array_length(_parts,1)-1];
+END
+$function$
+"
+"storage","get_size_by_bucket","","record","set-returning","volatile","CREATE OR REPLACE FUNCTION storage.get_size_by_bucket()
+ RETURNS TABLE(size bigint, bucket_id text)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    return query
+        select sum((metadata->>'size')::int) as size, obj.bucket_id
+        from "storage".objects as obj
+        group by obj.bucket_id;
+END
+$function$
+"
+"storage","list_multipart_uploads_with_delimiter","bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, next_key_token text DEFAULT ''::text, next_upload_token text DEFAULT ''::text","record","set-returning","volatile","CREATE OR REPLACE FUNCTION storage.list_multipart_uploads_with_delimiter(bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, next_key_token text DEFAULT ''::text, next_upload_token text DEFAULT ''::text)
+ RETURNS TABLE(key text, id text, created_at timestamp with time zone)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY EXECUTE
+        'SELECT DISTINCT ON(key COLLATE "C") * from (
+            SELECT
+                CASE
+                    WHEN position($2 IN substring(key from length($1) + 1)) > 0 THEN
+                        substring(key from 1 for length($1) + position($2 IN substring(key from length($1) + 1)))
+                    ELSE
+                        key
+                END AS key, id, created_at
+            FROM
+                storage.s3_multipart_uploads
+            WHERE
+                bucket_id = $5 AND
+                key ILIKE $1 || ''%'' AND
+                CASE
+                    WHEN $4 != '''' AND $6 = '''' THEN
+                        CASE
+                            WHEN position($2 IN substring(key from length($1) + 1)) > 0 THEN
+                                substring(key from 1 for length($1) + position($2 IN substring(key from length($1) + 1))) COLLATE "C" > $4
+                            ELSE
+                                key COLLATE "C" > $4
+                            END
+                    ELSE
+                        true
+                END AND
+                CASE
+                    WHEN $6 != '''' THEN
+                        id COLLATE "C" > $6
+                    ELSE
+                        true
+                    END
+            ORDER BY
+                key COLLATE "C" ASC, created_at ASC) as e order by key COLLATE "C" LIMIT $3'
+        USING prefix_param, delimiter_param, max_keys, next_key_token, bucket_id, next_upload_token;
+END;
+$function$
+"
+"storage","list_objects_with_delimiter","bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, start_after text DEFAULT ''::text, next_token text DEFAULT ''::text","record","set-returning","volatile","CREATE OR REPLACE FUNCTION storage.list_objects_with_delimiter(bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, start_after text DEFAULT ''::text, next_token text DEFAULT ''::text)
+ RETURNS TABLE(name text, id uuid, metadata jsonb, updated_at timestamp with time zone)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY EXECUTE
+        'SELECT DISTINCT ON(name COLLATE "C") * from (
+            SELECT
+                CASE
+                    WHEN position($2 IN substring(name from length($1) + 1)) > 0 THEN
+                        substring(name from 1 for length($1) + position($2 IN substring(name from length($1) + 1)))
+                    ELSE
+                        name
+                END AS name, id, metadata, updated_at
+            FROM
+                storage.objects
+            WHERE
+                bucket_id = $5 AND
+                name ILIKE $1 || ''%'' AND
+                CASE
+                    WHEN $6 != '''' THEN
+                    name COLLATE "C" > $6
+                ELSE true END
+                AND CASE
+                    WHEN $4 != '''' THEN
+                        CASE
+                            WHEN position($2 IN substring(name from length($1) + 1)) > 0 THEN
+                                substring(name from 1 for length($1) + position($2 IN substring(name from length($1) + 1))) COLLATE "C" > $4
+                            ELSE
+                                name COLLATE "C" > $4
+                            END
+                    ELSE
+                        true
+                END
+            ORDER BY
+                name COLLATE "C" ASC) as e order by name COLLATE "C" LIMIT $3'
+        USING prefix_param, delimiter_param, max_keys, next_token, bucket_id, start_after;
+END;
+$function$
+"
+"storage","operation","","text","scalar","stable","CREATE OR REPLACE FUNCTION storage.operation()
+ RETURNS text
+ LANGUAGE plpgsql
+ STABLE
+AS $function$
+BEGIN
+    RETURN current_setting('storage.operation', true);
+END;
+$function$
+"
+"storage","search","prefix text, bucketname text, limits integer DEFAULT 100, levels integer DEFAULT 1, offsets integer DEFAULT 0, search text DEFAULT ''::text, sortcolumn text DEFAULT 'name'::text, sortorder text DEFAULT 'asc'::text","record","set-returning","stable","CREATE OR REPLACE FUNCTION storage.search(prefix text, bucketname text, limits integer DEFAULT 100, levels integer DEFAULT 1, offsets integer DEFAULT 0, search text DEFAULT ''::text, sortcolumn text DEFAULT 'name'::text, sortorder text DEFAULT 'asc'::text)
+ RETURNS TABLE(name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb)
+ LANGUAGE plpgsql
+ STABLE
+AS $function$
+declare
+  v_order_by text;
+  v_sort_order text;
+begin
+  case
+    when sortcolumn = 'name' then
+      v_order_by = 'name';
+    when sortcolumn = 'updated_at' then
+      v_order_by = 'updated_at';
+    when sortcolumn = 'created_at' then
+      v_order_by = 'created_at';
+    when sortcolumn = 'last_accessed_at' then
+      v_order_by = 'last_accessed_at';
+    else
+      v_order_by = 'name';
+  end case;
+
+  case
+    when sortorder = 'asc' then
+      v_sort_order = 'asc';
+    when sortorder = 'desc' then
+      v_sort_order = 'desc';
+    else
+      v_sort_order = 'asc';
+  end case;
+
+  v_order_by = v_order_by || ' ' || v_sort_order;
+
+  return query execute
+    'with folders as (
+       select path_tokens[$1] as folder
+       from storage.objects
+         where objects.name ilike $2 || $3 || ''%''
+           and bucket_id = $4
+           and array_length(objects.path_tokens, 1) <> $1
+       group by folder
+       order by folder ' || v_sort_order || '
+     )
+     (select folder as "name",
+            null as id,
+            null as updated_at,
+            null as created_at,
+            null as last_accessed_at,
+            null as metadata from folders)
+     union all
+     (select path_tokens[$1] as "name",
+            id,
+            updated_at,
+            created_at,
+            last_accessed_at,
+            metadata
+     from storage.objects
+     where objects.name ilike $2 || $3 || ''%''
+       and bucket_id = $4
+       and array_length(objects.path_tokens, 1) = $1
+     order by ' || v_order_by || ')
+     limit $5
+     offset $6' using levels, prefix, search, bucketname, limits, offsets;
+end;
+$function$
+"
+"storage","update_updated_at_column","","trigger","scalar","volatile","CREATE OR REPLACE FUNCTION storage.update_updated_at_column()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW; 
+END;
+$function$
+"

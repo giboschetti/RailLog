@@ -42,13 +42,14 @@ const moveTypeLabels: Record<string, string> = {
  */
 export async function getWagonTrajectory(wagonId: string): Promise<FormattedTrajectory[]> {
   // Fetch all trajectory records for this wagon with related data
+  // Explicitly join with trips table to get trip details
   const { data, error } = await supabase
     .from('wagon_trajectories')
     .select(`
       *,
       tracks!wagon_trajectories_track_id_fkey(id, name, node_id),
       previous_track:tracks!wagon_trajectories_previous_track_id_fkey(id, name, node_id),
-      trips(id, type, transport_plan_number)
+      trips(id, type, transport_plan_number, datetime)
     `)
     .eq('wagon_id', wagonId)
     .order('timestamp', { ascending: false });
@@ -62,9 +63,55 @@ export async function getWagonTrajectory(wagonId: string): Promise<FormattedTraj
     return [];
   }
 
+  // Check for duplicate records - specifically filter out 'initial' records
+  // when there's already a 'delivery' record for the same location
+  
+  // Create a set of locations where we have delivery records
+  const deliveryLocations = new Set<string>();
+  
+  // Track delivery records by trip_id for the case where they share the same trip
+  const deliveryWithTripIds = new Set<string>();
+  
+  // First pass: identify all locations where we have delivery records
+  data.forEach(record => {
+    if (record.move_type === 'delivery') {
+      // Track by location (track_id)
+      if (record.track_id) {
+        deliveryLocations.add(record.track_id);
+      }
+      
+      // Also track by trip_id if available
+      if (record.trip_id) {
+        deliveryWithTripIds.add(record.trip_id);
+      }
+    }
+  });
+
+  // Filter out redundant 'initial' records
+  const filteredData = data.filter(record => {
+    // Keep the record if it's not an 'initial' record
+    if (record.move_type !== 'initial') {
+      return true;
+    }
+    
+    // For 'initial' records, filter them out if:
+    // 1. There's a 'delivery' record with the same trip_id
+    if (record.trip_id && deliveryWithTripIds.has(record.trip_id)) {
+      return false;
+    }
+    
+    // 2. Or if there's a 'delivery' record for the same location (track_id)
+    if (record.track_id && deliveryLocations.has(record.track_id)) {
+      return false;
+    }
+    
+    // Keep all other 'initial' records
+    return true;
+  });
+
   // Get all node IDs to fetch node names
   const nodeIds = new Set<string>();
-  data.forEach(record => {
+  filteredData.forEach(record => {
     if (record.tracks && record.tracks.node_id) {
       nodeIds.add(record.tracks.node_id);
     }
@@ -92,8 +139,8 @@ export async function getWagonTrajectory(wagonId: string): Promise<FormattedTraj
   }
 
   // Format the trajectory data
-  const formattedTrajectories: FormattedTrajectory[] = data.map((record, index) => {
-    const nextRecord = data[index + 1]; // the next record is the previous movement in time
+  const formattedTrajectories: FormattedTrajectory[] = filteredData.map((record, index) => {
+    const nextRecord = filteredData[index + 1]; // the next record is the previous movement in time
 
     // Calculate duration at the location
     let durationAtLocation = '';
@@ -133,8 +180,10 @@ export async function getWagonTrajectory(wagonId: string): Promise<FormattedTraj
       }
     }
 
-    // Format date and time
-    const date = new Date(record.timestamp);
+    // Format date and time from the trajectory timestamp
+    // Use trip datetime if available (instead of record creation time)
+    const tripDatetime = record.trips && record.trips.datetime;
+    const date = new Date(tripDatetime || record.timestamp);
     const formattedDate = date.toLocaleDateString('de-DE', {
       year: 'numeric',
       month: '2-digit',
