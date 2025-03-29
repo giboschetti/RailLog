@@ -220,18 +220,19 @@ const TripModal: React.FC<TripModalProps> = ({
     const wagonType = wagonTypes.find(type => type.id === group.wagonTypeId);
     const defaultLength = wagonType?.default_length || 0;
     
-    // Create empty wagon objects based on quantity
+    // Create wagon objects based on quantity
     const wagons = Array(group.quantity || 1).fill(0).map(() => {
       const tempId = uuidv4();
       return {
         id: tempId,
         type_id: group.wagonTypeId,
-        number: null, // Will be filled in if needed
+        number: null, 
         content: group.content || '',
         temp_id: tempId,
         length: defaultLength,
         project_id: project.id,
         construction_site_id: null,
+        current_track_id: destTrackId, // Always set track ID regardless of execution status
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       } as unknown as Wagon;
@@ -278,6 +279,7 @@ const TripModal: React.FC<TripModalProps> = ({
               length: defaultLength, // Use the default length from the wagon type
               project_id: project.id, // Set the project ID
               construction_site_id: constructionSiteId, // Set the construction site ID
+              current_track_id: destTrackId, // Always set track ID regardless of execution status
               created_at: new Date().toISOString(),
               updated_at: new Date().toISOString()
             } as unknown as Wagon;
@@ -341,18 +343,23 @@ const TripModal: React.FC<TripModalProps> = ({
       }
 
       // 2. Prepare trip data - using only confirmed database columns
+      const tripDateTime = new Date(dateTime);
+      
+      // Automatically determine is_planned status based on date
+      const isAutoPlanned = tripDateTime > new Date();
+      
       const tripData = {
-        project_id: project.id,
-        datetime: dateTime,
-        type: type,
-        source_track_id: sourceTrackId || null,
-        dest_track_id: destTrackId || null,
+        type,
+        datetime: tripDateTime.toISOString(),
+        source_track_id: (type === 'departure' || type === 'internal') ? sourceTrackId : null,
+        dest_track_id: (type === 'delivery' || type === 'internal') ? destTrackId : null,
         transport_plan_number: transportPlanNumber || null,
+        is_planned: isAutoPlanned, // Use auto-determined value
         transport_plan_file: transportPlanFile ? await uploadFile(transportPlanFile) : transportPlanFileUrl,
-        is_planned: isPlanned,
+        project_id: project.id,
         has_conflicts: validationWarnings.length > 0,
         comment: comment || null,
-        construction_site_id: null
+        construction_site_id: (project as any).construction_site_id || null
       };
 
       // Remove the id field from tripData if it's a new trip (causes issues with default uuid generation)
@@ -438,6 +445,11 @@ const TripModal: React.FC<TripModalProps> = ({
                 // Log the current wagon number being processed
                 console.log(`Processing wagon with number: ${wagon.number || 'null'}`);
                 
+                // Determine if this is an executed trip (past date)
+                const tripDate = new Date(dateTime);
+                const isExecuted = tripDate <= new Date();
+                
+                // For executed trips, immediately set current_track_id to destination track
                 let wagonData = {
                   id: uuidv4(),
                   type_id: wagonTypeId,
@@ -445,19 +457,24 @@ const TripModal: React.FC<TripModalProps> = ({
                   content: wagonContent || '',
                   project_id: project.id,
                   construction_site_id: wagon.construction_site_id || null,
-                  current_track_id: isPlanned ? null : destTrackId,
+                  current_track_id: destTrackId, // Always set track ID regardless of execution status
                   number: wagon.number || null, // Use the number from the wagon object
                   created_at: new Date().toISOString(),
                   updated_at: new Date().toISOString()
                 };
                 
-                console.log(`Adding wagon to create with number: ${wagonData.number || 'null'}`);
+                console.log(`Adding wagon with number: ${wagonData.number || 'null'}, current_track_id: ${wagonData.current_track_id || 'null'}`);
                 wagonsToCreate.push(wagonData);
               }
             } else {
               // Fallback for cases where wagons array isn't initialized
               const wagonQuantity = group.quantity || 1;
               for (let i = 0; i < wagonQuantity; i++) {
+                // Determine if this is an executed trip (past date)
+                const tripDate = new Date(dateTime);
+                const isExecuted = tripDate <= new Date();
+                
+                // For executed trips, immediately set current_track_id to destination track
                 let wagonData = {
                   id: uuidv4(),
                   type_id: wagonTypeId,
@@ -465,12 +482,13 @@ const TripModal: React.FC<TripModalProps> = ({
                   content: wagonContent || '',
                   project_id: project.id,
                   construction_site_id: null,
-                  current_track_id: isPlanned ? null : destTrackId,
+                  current_track_id: destTrackId, // Always set track ID regardless of execution status
                   number: null,
                   created_at: new Date().toISOString(),
                   updated_at: new Date().toISOString()
                 };
                 
+                console.log(`Adding fallback wagon, current_track_id: ${wagonData.current_track_id || 'null'}`);
                 wagonsToCreate.push(wagonData);
               }
             }
@@ -582,8 +600,8 @@ const TripModal: React.FC<TripModalProps> = ({
             throw new Error(`Failed to link wagons to internal trip: ${linkError.message}`);
           }
           
-          // If the trip is executed, update the wagon's current track ID
-          if (!isPlanned && destTrackId) {
+          // Always update the wagon's current track ID
+          if (destTrackId) {
             const wagonIds = selectedExistingWagons.map(w => w.id);
             
             const { error: updateError } = await supabase
@@ -939,17 +957,20 @@ const TripModal: React.FC<TripModalProps> = ({
           </div>
 
           <div className="mb-4">
-            <div className="flex items-center">
-              <input
-                id="isPlanned"
-                type="checkbox"
-                checked={isPlanned}
-                onChange={(e) => setIsPlanned(e.target.checked)}
-                className="h-4 w-4 text-primary focus:ring-primary border-gray-300 rounded"
-              />
-              <label htmlFor="isPlanned" className="ml-2 block text-sm text-gray-700">
-                Ist geplant
-              </label>
+            <div className="bg-blue-50 p-4 rounded-md">
+              <h4 className="text-sm font-medium text-blue-800 mb-1">Trip-Status Information</h4>
+              <p className="text-sm text-blue-600">
+                Der Status des Trips wird automatisch anhand des Datums bestimmt:
+              </p>
+              <ul className="text-sm text-blue-600 list-disc list-inside mt-1">
+                <li>Trips in der Vergangenheit sind automatisch ausgeführt.</li>
+                <li>Trips in der Zukunft sind automatisch geplant.</li>
+              </ul>
+              {dateTime && (
+                <p className="text-sm font-medium text-blue-800 mt-2">
+                  Status dieses Trips: {new Date(dateTime) > new Date() ? 'Geplant' : 'Ausgeführt'}
+                </p>
+              )}
             </div>
           </div>
 
@@ -991,9 +1012,14 @@ const TripModal: React.FC<TripModalProps> = ({
                       const wagonType = wagonTypes.find(type => type.id === group.wagonTypeId);
                       const defaultLength = wagonType?.default_length || 0;
                       
-                      // Create empty wagon objects based on quantity
+                      // Create wagon objects based on quantity
                       const wagons = Array(group.quantity || 1).fill(0).map(() => {
                         const tempId = uuidv4();
+                        
+                        // Determine if this is an executed trip (past date)
+                        const tripDate = new Date(dateTime);
+                        const isExecuted = tripDate <= new Date();
+                        
                         return {
                           id: tempId,
                           type_id: group.wagonTypeId,
@@ -1003,7 +1029,7 @@ const TripModal: React.FC<TripModalProps> = ({
                           length: defaultLength,
                           project_id: project.id,
                           construction_site_id: null,
-                          current_track_id: isPlanned ? null : destTrackId,
+                          current_track_id: destTrackId, // Always set track ID regardless of execution status
                           created_at: new Date().toISOString(),
                           updated_at: new Date().toISOString()
                         } as unknown as Wagon;

@@ -6,11 +6,9 @@ import { supabase } from '@/lib/supabase';
 import { Node } from '@/lib/supabase';
 import { useToast } from '@/components/ui/use-toast';
 import { formatDateTime } from '@/lib/utils';
+import { getTrackWagonsFromCurrentTrackId, getTrackWagonsAtTime } from '@/lib/trackUtils';
 import { useWagonDragDrop } from '@/hooks/useWagonDragDrop';
 import { useRouter } from 'next/navigation';
-import { 
-  getTrackWagonsFromCurrentTrackId
-} from "@/lib/trackUtils";
 
 // Define a utility function to generate colors based on construction site ID
 const getColorForConstructionSite = (siteId: string | undefined): string => {
@@ -140,13 +138,13 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
         
         console.log(`Fetching wagons for track ${track.id} at ${targetTime}`);
         
-        // Use direct current_track_id approach instead of trajectory-based method
-        const trackData = await getTrackWagonsFromCurrentTrackId(track.id, targetTime);
+        // Use the new time-based function instead of current_track_id approach
+        const trackData = await getTrackWagonsAtTime(track.id, targetTime);
         
         if (trackData.success) {
           setTrackData(trackData.trackData);
           setWagons(trackData.wagons);
-          console.log(`Set ${trackData.wagons.length} wagons for track ${track.id}`);
+          console.log(`Set ${trackData.wagons.length} wagons for track ${track.id} at time ${targetTime}`);
         } else {
           console.error("Error fetching track data:", trackData.errorMessage);
           setWagons([]);
