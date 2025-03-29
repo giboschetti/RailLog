@@ -1406,7 +1406,8 @@ export function validateDragDrop(
 }
 
 /**
- * Gets wagons on a track at a specific time using simplified SQL functions
+ * Gets wagons on a track at a specific time using the PostgreSQL function
+ * This properly uses trajectory data to display wagons at the right time
  */
 export async function getTrackWagonsAtTime(
   trackId: string,
@@ -1418,7 +1419,7 @@ export async function getTrackWagonsAtTime(
   errorMessage?: string;
 }> {
   try {
-    console.log(`Fetching track data for track ${trackId} at ${datetime}`);
+    console.log(`Fetching track data for track ${trackId} at ${datetime} using SQL functions`);
     
     // 1. Get track occupancy data using the SQL function
     const { data: occupancyData, error: occupancyError } = await supabase
@@ -1449,27 +1450,15 @@ export async function getTrackWagonsAtTime(
       };
     }
     
-    // 2. Get wagons on this track 
+    // 2. Get wagons on this track at the specified time using the SQL function
     const { data: wagonsData, error: wagonsError } = await supabase
-      .from('wagons')
-      .select(`
-        id,
-        number,
-        length,
-        content,
-        project_id,
-        construction_site_id,
-        type_id,
-        current_track_id,
-        wagon_types (
-          name,
-          default_length
-        )
-      `)
-      .eq('current_track_id', trackId);
+      .rpc('get_track_wagons_at_time', {
+        track_id_param: trackId,
+        time_point: datetime
+      });
     
     if (wagonsError) {
-      console.error("Error fetching wagons:", wagonsError);
+      console.error("Error fetching wagons at time:", wagonsError);
       return { 
         success: false, 
         trackData: null, 
@@ -1478,7 +1467,7 @@ export async function getTrackWagonsAtTime(
       };
     }
     
-    console.log(`Found ${wagonsData?.length || 0} wagons on track ${trackId}`);
+    console.log(`Found ${wagonsData?.length || 0} wagons on track ${trackId} at ${datetime}`);
     
     // Create enhanced track data from the occupancy result
     const enhancedTrackData: TrackWithOccupancy = {
@@ -1503,33 +1492,72 @@ export async function getTrackWagonsAtTime(
       };
     }
     
-    // Convert the wagon data to WagonOnTrack[] format
-    let position = 0;
-    const wagonsOnTrack: WagonOnTrack[] = wagonsData.map((wagon: any) => {
-      const wagonLength = wagon.length || 0;
-      const result = {
-        id: wagon.id,
-        number: wagon.number || undefined,
+    // Process the SQL function results
+    // We need to fetch the complete wagon details to include all properties our UI expects
+    const wagonIds = wagonsData.map((w: any) => w.wagon_id);
+    
+    // Get full wagon details
+    const { data: fullWagonData, error: fullWagonError } = await supabase
+      .from('wagons')
+      .select(`
+        id,
+        number,
+        length,
+        content,
+        project_id,
+        construction_site_id,
+        type_id,
+        wagon_types (
+          name,
+          default_length
+        )
+      `)
+      .in('id', wagonIds);
+    
+    if (fullWagonError) {
+      console.error("Error fetching full wagon details:", fullWagonError);
+      return {
+        success: false,
+        trackData: null,
+        wagons: [],
+        errorMessage: `Error fetching full wagon details: ${fullWagonError.message}`
+      };
+    }
+    
+    // Create a lookup of full wagon details by ID
+    const wagonDetailsById = new Map();
+    fullWagonData?.forEach((wagon: any) => {
+      wagonDetailsById.set(wagon.id, wagon);
+    });
+    
+    // Map the wagons from the SQL function to the full WagonOnTrack objects
+    const wagonsOnTrack: WagonOnTrack[] = wagonsData.map((wagon: any, index: number) => {
+      const fullWagon = wagonDetailsById.get(wagon.wagon_id);
+      if (!fullWagon) {
+        console.warn(`No full details found for wagon ID ${wagon.wagon_id}`);
+        return null;
+      }
+      
+      const wagonLength = fullWagon.length || 0;
+      
+      return {
+        id: wagon.wagon_id,
+        number: fullWagon.number || undefined,
         length: wagonLength,
-        content: wagon.content || undefined,
-        project_id: wagon.project_id || undefined,
-        construction_site_id: wagon.construction_site_id || undefined,
-        type_id: wagon.type_id || undefined,
-        position: position,
+        content: fullWagon.content || undefined,
+        project_id: fullWagon.project_id || undefined,
+        construction_site_id: fullWagon.construction_site_id || undefined,
+        type_id: fullWagon.type_id || undefined,
+        position: wagon.position || index * 10, // Use position from SQL or fall back to index
         current_track_id: trackId,
         created_at: '',
         updated_at: '',
         wagon_types: { 
-          name: wagon.wagon_types?.name || '',
-          default_length: wagon.wagon_types?.default_length || wagonLength
+          name: fullWagon.wagon_types?.name || wagon.wagon_type || '',
+          default_length: fullWagon.wagon_types?.default_length || wagonLength
         }
       } as WagonOnTrack;
-      
-      // Update position for next wagon
-      position += wagonLength;
-      
-      return result;
-    });
+    }).filter(Boolean); // Remove any null values
     
     console.log(`Successfully processed ${wagonsOnTrack.length} wagons for track ${trackId}`);
     
