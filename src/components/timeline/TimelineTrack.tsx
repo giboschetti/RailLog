@@ -145,13 +145,14 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
     const fetchTrackData = async () => {
       try {
         setLoading(true);
+        setError(null); // Clear any previous errors
         
         // Get the date in ISO format
         const targetTime = new Date(date).toISOString();
         
         console.log(`Fetching wagons for track ${track.id} at ${targetTime}`);
         
-        // Use the new time-based function instead of current_track_id approach
+        // Use the simplified approach that directly queries wagons table
         const trackData = await getTrackWagonsAtTime(track.id, targetTime);
         
         if (trackData.success) {
@@ -160,10 +161,38 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
           console.log(`Set ${trackData.wagons.length} wagons for track ${track.id} at time ${targetTime}`);
         } else {
           console.error("Error fetching track data:", trackData.errorMessage);
+          setError(trackData.errorMessage || "Failed to load track data");
+          // Set default track data even if there was an error
+          setTrackData({
+            id: track.id,
+            name: track.name,
+            node_id: '', // Use empty string since track.node_id doesn't exist in the type
+            useful_length: track.useful_length,
+            occupiedLength: 0,
+            availableLength: track.useful_length || 0,
+            usagePercentage: 0,
+            wagonCount: 0,
+            created_at: '',
+            updated_at: ''
+          });
           setWagons([]);
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error(`Error loading wagons for track ${track.id}:`, error);
+        setError(error.message || "Failed to load track data");
+        // Set default track data even if there was an error
+        setTrackData({
+          id: track.id,
+          name: track.name,
+          node_id: '', // Use empty string since track.node_id doesn't exist in the type
+          useful_length: track.useful_length,
+          occupiedLength: 0,
+          availableLength: track.useful_length || 0,
+          usagePercentage: 0,
+          wagonCount: 0,
+          created_at: '',
+          updated_at: ''
+        });
         setWagons([]);
       } finally {
         setLoading(false);
@@ -657,114 +686,154 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
           </div>
         </div>
 
-        {/* Track capacity visualization */}
-        <div className="relative h-16 bg-gray-100 rounded-md overflow-hidden shadow-sm">
-          {/* Occupied area */}
-          <div 
-            className="absolute top-0 h-full bg-blue-200" 
-            style={{ width: `${trackData?.usagePercentage || 0}%` }}
-          ></div>
-          
-          {/* Wagons on track */}
-          <div className="relative h-10 mt-2 w-full">
-            {(() => {
-              // Final wagons deduplication check just before rendering
-              const uniqueWagons = new Map();
-              wagons.forEach(wagon => {
-                if (!wagon.id) return; // Skip wagons without ID
-                uniqueWagons.set(wagon.id, wagon);
-              });
+        {loading ? (
+          <div className="flex items-center justify-center h-16 bg-gray-100 rounded-md">
+            <span className="text-gray-500">Lade Daten...</span>
+          </div>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center h-16 bg-red-50 rounded-md border border-red-200 p-2">
+            <span className="text-red-600 text-sm">{error}</span>
+            <button 
+              className="text-xs text-blue-600 mt-1 hover:underline"
+              onClick={() => {
+                if (onRefresh) onRefresh();
+              }}
+            >
+              Erneut versuchen
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* Track capacity visualization */}
+            <div className="relative h-16 bg-gray-100 rounded-md overflow-hidden shadow-sm">
+              {/* Occupied area visualization */}
+              <div 
+                className="absolute top-0 h-full bg-blue-200 flex items-center justify-end pr-2" 
+                style={{ width: `${trackData?.usagePercentage || 0}%` }}
+              >
+                {trackData?.usagePercentage > 15 && (
+                  <span className="text-xs text-blue-700 font-medium">
+                    {Math.round(trackData?.usagePercentage || 0)}%
+                  </span>
+                )}
+              </div>
               
-              const finalWagons = Array.from(uniqueWagons.values());
-              if (finalWagons.length < wagons.length) {
-                console.log(`Final deduplication removed ${wagons.length - finalWagons.length} duplicate wagons before rendering`);
-              }
+              {/* Capacity ruler marks */}
+              <div className="absolute top-0 w-full h-full pointer-events-none">
+                <div className="absolute top-0 left-1/4 h-full border-l border-gray-300 border-dashed opacity-30"></div>
+                <div className="absolute top-0 left-1/2 h-full border-l border-gray-300 border-dashed opacity-30"></div>
+                <div className="absolute top-0 left-3/4 h-full border-l border-gray-300 border-dashed opacity-30"></div>
+              </div>
               
-              // Now render only the unique wagons
-              return finalWagons
-                .sort((a, b) => (a.position || 0) - (b.position || 0))
-                .map(wagon => {
-                  // Calculate position and width based on track dimensions
-                  const wagonLength = wagon.length || 0;
-                  const trackTotalLength = totalLength || 1;
-                  const wagonLeft = (wagon.position || 0) / trackTotalLength * 100;
-                  const wagonWidth = wagonLength / trackTotalLength * 100;
+              {/* Wagons on track */}
+              <div className="relative h-full pt-2 pb-2 w-full">
+                {(() => {
+                  // Deduplicate wagons before rendering
+                  const uniqueWagons = new Map();
+                  wagons.forEach(wagon => {
+                    if (!wagon.id) return; // Skip wagons without ID
+                    uniqueWagons.set(wagon.id, wagon);
+                  });
                   
-                  // Get color based on construction site or project
-                  const constructionSiteId = (wagon as any).construction_site_id;
-                  const constructionSiteName = constructionSites[constructionSiteId]?.name;
-                  const wagonColor = getColorForConstructionSite(constructionSiteId);
+                  const finalWagons = Array.from(uniqueWagons.values());
                   
-                  const wagonData = wagon as any;
-                  const wagonTypeName = wagonData.wagon_types?.name || wagonData.custom_type || '';
-                  
-                  // Get last 4 digits of ID (from number or temp_id)
-                  const displayId = wagon.number ? 
-                    wagon.number.slice(-4) : 
-                    (wagon.temp_id ? wagon.temp_id.slice(-4) : wagon.id.slice(-4));
-                  
-                  // Create readable tooltip with better formatting
-                  const tooltipContent = `
+                  // Now render only the unique wagons
+                  return finalWagons
+                    .sort((a, b) => (a.position || 0) - (b.position || 0))
+                    .map(wagon => {
+                      // Calculate position and width based on track dimensions
+                      const wagonLength = wagon.length || 0;
+                      const trackTotalLength = totalLength || 1;
+                      const wagonLeft = (wagon.position || 0) / trackTotalLength * 100;
+                      const wagonWidth = wagonLength / trackTotalLength * 100;
+                      
+                      // Get color based on construction site or project
+                      const constructionSiteId = (wagon as any).construction_site_id;
+                      const constructionSiteName = constructionSites[constructionSiteId]?.name;
+                      const wagonColor = getColorForConstructionSite(constructionSiteId);
+                      
+                      const wagonData = wagon as any;
+                      const wagonTypeName = wagonData.wagon_types?.name || wagonData.custom_type || '';
+                      
+                      // Get last 4 digits of ID (from number or temp_id)
+                      const displayId = wagon.number ? 
+                        wagon.number.slice(-4) : 
+                        (wagon.temp_id ? wagon.temp_id.slice(-4) : wagon.id.slice(-4));
+                      
+                      // Create readable tooltip
+                      const tooltipContent = `
 Typ: ${wagonTypeName}
 ID: ${wagon.number || wagon.temp_id || wagon.id}
 Länge: ${wagon.length}m
 ${constructionSiteName ? `Baustelle: ${constructionSiteName}` : ''}
 `.trim();
-                  
-                  return (
-                    <div
-                      key={wagon.id}
-                      className={`absolute top-0 h-full ${wagonColor} border-r flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
-                      style={{ 
-                        left: `${wagonLeft}%`, 
-                        width: `${wagonWidth}%`,
-                        minWidth: wagonWidth < 1 ? '20px' : '25px' // Adjust minimum size based on relative width
-                      }}
-                      title={tooltipContent}
-                      onClick={() => onWagonSelect && onWagonSelect(wagon.id)}
-                      draggable
-                      onDragStart={(e) => handleDragStart(e, wagon)}
-                    >
-                      <div className="flex flex-col items-center justify-center h-full w-full px-0.5">
-                        {/* For larger wagons, show type and construction site */}
-                        {wagonWidth > 6 && (
-                          <span className={`text-white text-center leading-tight font-medium ${wagonWidth <= 12 ? 'text-[9px]' : 'text-xs'}`}>
-                            {wagonTypeName}{constructionSiteName ? ` - ${constructionSiteName.substring(0, 6)}${constructionSiteName.length > 6 ? '...' : ''}` : ''}
-                          </span>
-                        )}
-                        
-                        {/* For medium wagons, show simplified info */}
-                        {wagonWidth <= 6 && wagonWidth > 3 && (
-                          <span className="text-white text-center leading-none text-[8px]">
-                            {wagonTypeName ? wagonTypeName.substring(0, 4) : ''}
-                          </span>
-                        )}
-                        
-                        {/* Always show the ID */}
-                        <span className={`text-white text-center font-bold ${
-                          wagonWidth <= 3 ? 'text-[7px] leading-none' : 
-                          wagonWidth <= 6 ? 'text-[8px] leading-none' : 
-                          wagonWidth <= 10 ? 'text-[10px]' : 'text-sm'
-                        }`}>
-                          {displayId}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                });
-            })()}
-          </div>
-        </div>
+                      
+                      console.log(`Rendering wagon: ${wagon.id}, left: ${wagonLeft}%, width: ${wagonWidth}%, length: ${wagonLength}m`);
+                      
+                      return (
+                        <div
+                          key={wagon.id}
+                          className={`absolute ${wagonColor} border border-1 rounded-md shadow-sm flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
+                          style={{ 
+                            left: `${wagonLeft}%`, 
+                            width: `${wagonWidth}%`,
+                            minWidth: wagonWidth < 1 ? '20px' : '25px',
+                            top: '3px',
+                            height: 'calc(100% - 6px)',
+                            zIndex: 10
+                          }}
+                          title={tooltipContent}
+                          onClick={() => onWagonSelect && onWagonSelect(wagon.id)}
+                          draggable
+                          onDragStart={(e) => handleDragStart(e, wagon)}
+                        >
+                          <div className="flex flex-col items-center justify-center h-full w-full px-0.5">
+                            {/* For larger wagons, show type and construction site */}
+                            {wagonWidth > 6 && (
+                              <span className={`text-white text-center leading-tight font-medium ${wagonWidth <= 12 ? 'text-[9px]' : 'text-xs'}`}>
+                                {wagonTypeName}{constructionSiteName ? ` - ${constructionSiteName.substring(0, 6)}${constructionSiteName.length > 6 ? '...' : ''}` : ''}
+                              </span>
+                            )}
+                            
+                            {/* For medium wagons, show simplified info */}
+                            {wagonWidth <= 6 && wagonWidth > 3 && (
+                              <span className="text-white text-center leading-none text-[8px]">
+                                {wagonTypeName ? wagonTypeName.substring(0, 4) : ''}
+                              </span>
+                            )}
+                            
+                            {/* Always show the ID */}
+                            <span className={`text-white text-center font-bold ${
+                              wagonWidth <= 3 ? 'text-[7px] leading-none' : 
+                              wagonWidth <= 6 ? 'text-[8px] leading-none' : 
+                              wagonWidth <= 10 ? 'text-[10px]' : 'text-sm'
+                            }`}>
+                              {displayId}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    });
+                })()}
+              </div>
+            </div>
 
-        {/* Additional information */}
-        <div className="mt-2 flex justify-between text-xs text-gray-500">
-          <div>
-            {wagonCount} Waggon{wagonCount !== 1 ? 's' : ''}
-          </div>
-          <div>
-            {availableLength}m verfügbar
-          </div>
-        </div>
+            {/* Enhanced track occupancy information */}
+            <div className="mt-2 grid grid-cols-3 text-xs">
+              <div className="text-gray-500">
+                {wagonCount} Waggon{wagonCount !== 1 ? 's' : ''}
+              </div>
+              <div className="text-center font-medium">
+                <span className="text-blue-600">{occupiedLength}m</span>
+                <span className="text-gray-400"> / </span>
+                <span className="text-gray-600">{totalLength}m</span>
+              </div>
+              <div className="text-right text-green-600 font-medium">
+                {availableLength}m verfügbar
+              </div>
+            </div>
+          </>
+        )}
       </div>
       
       {/* Add the restriction confirmation dialog */}
