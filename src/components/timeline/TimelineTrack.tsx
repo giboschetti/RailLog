@@ -765,21 +765,22 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
 Typ: ${wagonTypeName}
 ID: ${wagon.number || wagon.temp_id || wagon.id}
 Länge: ${wagon.length}m
+Position: ${wagon.position}m
 ${constructionSiteName ? `Baustelle: ${constructionSiteName}` : ''}
 `.trim();
                       
-                      console.log(`Rendering wagon: ${wagon.id}, left: ${wagonLeft}%, width: ${wagonWidth}%, length: ${wagonLength}m`);
+                      console.log(`Rendering wagon: ${wagon.id}, left: ${wagonLeft}%, width: ${wagonWidth}%, length: ${wagonLength}m, position: ${wagon.position}m`);
                       
                       return (
                         <div
                           key={wagon.id}
-                          className={`absolute ${wagonColor} border border-1 rounded-md shadow-sm flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
+                          className={`absolute ${wagonColor} border border-1 rounded-md shadow-md flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
                           style={{ 
                             left: `${wagonLeft}%`, 
                             width: `${wagonWidth}%`,
                             minWidth: wagonWidth < 1 ? '20px' : '25px',
-                            top: '3px',
-                            height: 'calc(100% - 6px)',
+                            top: '5px',  // Increased space from top
+                            height: 'calc(100% - 10px)',  // Reduced height for better visual
                             zIndex: 10
                           }}
                           title={tooltipContent}

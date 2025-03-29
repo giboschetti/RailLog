@@ -881,52 +881,54 @@ export async function getEnhancedTrackOccupancy(
       };
     }
     
-    // Create a map of wagons by ID for easy lookup
-    const wagonsById: Record<string, any> = {};
+    // Create a lookup of full wagon details by ID
+    const wagonDetailsById = new Map();
     wagonsData.forEach(wagon => {
-      wagonsById[wagon.id] = wagon;
+      wagonDetailsById.set(wagon.id, wagon);
     });
     
-    // Create an array of wagons with position information
-    const wagonsOnTrack: WagonOnTrack[] = [];
-    let currentPosition = 0;
-    
-    // Sort trajectories by event_time to maintain chronological order
-    const sortedTrajectories = [...uniqueTrajectories].sort((a, b) => {
-      const timeA = a.event_time ? new Date(a.event_time).getTime() : 0;
-      const timeB = b.event_time ? new Date(b.event_time).getTime() : 0;
-      return timeA - timeB;
-    });
-    
-    // Log all wagons we're going to display for debugging
-    console.log(`Displaying ${sortedTrajectories.length} wagons on track ${trackId}:`);
-    sortedTrajectories.forEach(trajectory => {
-      console.log(`Wagon ${trajectory.wagon_id} - move_type: ${trajectory.move_type} - time: ${trajectory.event_time}`);
-    });
-    
-    // Use a Set to track which wagons we've already added
-    const addedWagonIds = new Set<string>();
-    
-    sortedTrajectories.forEach(trajectory => {
-      const wagon = wagonsById[trajectory.wagon_id];
-      // Skip if this wagon is already added or not found
-      if (!wagon || addedWagonIds.has(wagon.id)) {
-        console.log(`Skipping wagon ${trajectory.wagon_id} - already added or not found`);
-        return;
+    // Map the wagons from the SQL function to the full WagonOnTrack objects
+    const wagonsArray = wagonsData.map((wagon: any) => {
+      const fullWagon = wagonDetailsById.get(wagon.wagon_id);
+      if (!fullWagon) {
+        console.warn(`No full details found for wagon ID ${wagon.wagon_id}`);
+        return null;
       }
       
-      const wagonLength = wagon.length || 0;
+      const wagonLength = fullWagon.length || 0;
       
-      wagonsOnTrack.push({
-        ...wagon,
-        position: currentPosition
-      } as WagonOnTrack);
-      
-      // Mark this wagon as added
-      addedWagonIds.add(wagon.id);
-      
-      currentPosition += wagonLength;
+      return {
+        id: wagon.wagon_id,
+        number: fullWagon.number || undefined,
+        length: wagonLength,
+        content: fullWagon.content || undefined,
+        project_id: fullWagon.project_id || undefined,
+        construction_site_id: fullWagon.construction_site_id || undefined,
+        type_id: fullWagon.type_id || undefined,
+        position: wagon.position || 0, // We'll recalculate positions later
+        current_track_id: trackId,
+        created_at: '',
+        updated_at: '',
+        wagon_types: { 
+          name: fullWagon.wagon_types?.name || wagon.wagon_type || '',
+          default_length: fullWagon.wagon_types?.default_length || wagonLength
+        }
+      } as WagonOnTrack;
+    }).filter(Boolean) as WagonOnTrack[]; // Remove any null values and cast to proper type
+    
+    // Calculate positions for wagons based on their order and length
+    // Sort wagons by any existing position information first
+    let wagonsOnTrack = [...wagonsArray].sort((a, b) => (a.position || 0) - (b.position || 0));
+    
+    // Now recalculate positions to ensure proper layout
+    let currentPosition = 0;
+    wagonsOnTrack = wagonsOnTrack.map(wagon => {
+      const updatedWagon = { ...wagon, position: currentPosition };
+      currentPosition += wagon.length || 0;
+      return updatedWagon;
     });
+    
+    console.log(`Successfully processed ${wagonsOnTrack.length} wagons for track ${trackId}`);
     
     // Calculate occupancy statistics
     const occupiedLength = wagonsOnTrack.reduce((sum, wagon) => sum + (wagon.length || 0), 0);
@@ -1531,7 +1533,7 @@ export async function getTrackWagonsAtTime(
     });
     
     // Map the wagons from the SQL function to the full WagonOnTrack objects
-    const wagonsOnTrack: WagonOnTrack[] = wagonsData.map((wagon: any, index: number) => {
+    const wagonsArray = wagonsData.map((wagon: any) => {
       const fullWagon = wagonDetailsById.get(wagon.wagon_id);
       if (!fullWagon) {
         console.warn(`No full details found for wagon ID ${wagon.wagon_id}`);
@@ -1548,7 +1550,7 @@ export async function getTrackWagonsAtTime(
         project_id: fullWagon.project_id || undefined,
         construction_site_id: fullWagon.construction_site_id || undefined,
         type_id: fullWagon.type_id || undefined,
-        position: wagon.position || index * 10, // Use position from SQL or fall back to index
+        position: wagon.position || 0, // We'll recalculate positions later
         current_track_id: trackId,
         created_at: '',
         updated_at: '',
@@ -1557,7 +1559,19 @@ export async function getTrackWagonsAtTime(
           default_length: fullWagon.wagon_types?.default_length || wagonLength
         }
       } as WagonOnTrack;
-    }).filter(Boolean); // Remove any null values
+    }).filter(Boolean) as WagonOnTrack[]; // Remove any null values and cast to proper type
+    
+    // Calculate positions for wagons based on their order and length
+    // Sort wagons by any existing position information first
+    let wagonsOnTrack = [...wagonsArray].sort((a, b) => (a.position || 0) - (b.position || 0));
+    
+    // Now recalculate positions to ensure proper layout
+    let currentPosition = 0;
+    wagonsOnTrack = wagonsOnTrack.map(wagon => {
+      const updatedWagon = { ...wagon, position: currentPosition };
+      currentPosition += wagon.length || 0;
+      return updatedWagon;
+    });
     
     console.log(`Successfully processed ${wagonsOnTrack.length} wagons for track ${trackId}`);
     
