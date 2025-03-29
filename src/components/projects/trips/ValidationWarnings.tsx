@@ -1,151 +1,121 @@
 import React from 'react';
-import { Button } from '@/components/ui/button';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import { AlertCircle, AlertTriangle, Clock, ArrowRight } from 'lucide-react';
 import { ValidationWarning } from '@/lib/tripValidation';
 
 interface ValidationWarningsProps {
   warnings: ValidationWarning[];
-  onProceedAnyway: () => void;
-  onCancel: () => void;
 }
 
-const ValidationWarnings: React.FC<ValidationWarningsProps> = ({
-  warnings,
-  onProceedAnyway,
-  onCancel
-}) => {
-  // Group warnings by type for better display
-  const capacityWarnings = warnings.filter(w => w.code === 'INSUFFICIENT_CAPACITY');
-  const restrictionWarnings = warnings.filter(w => w.code === 'ACTIVE_RESTRICTIONS');
-  const duplicateWarnings = warnings.filter(w => w.code === 'DUPLICATE_WAGON_NUMBERS');
-  const dateWarnings = warnings.filter(w => 
-    w.code === 'DATE_BEFORE_PROJECT' || w.code === 'DATE_AFTER_PROJECT'
-  );
-  const otherWarnings = warnings.filter(w => 
-    !['INSUFFICIENT_CAPACITY', 'ACTIVE_RESTRICTIONS', 'DUPLICATE_WAGON_NUMBERS', 
-      'DATE_BEFORE_PROJECT', 'DATE_AFTER_PROJECT'].includes(w.code)
-  );
+const ValidationWarnings: React.FC<ValidationWarningsProps> = ({ warnings }) => {
+  if (warnings.length === 0) return null;
+
+  // Group warnings by type
+  const groupedWarnings: Record<string, ValidationWarning[]> = {};
+  
+  warnings.forEach(warning => {
+    const type = warning.type || 'general';
+    if (!groupedWarnings[type]) {
+      groupedWarnings[type] = [];
+    }
+    groupedWarnings[type].push(warning);
+  });
 
   return (
-    <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Validierungswarnungen</h3>
+    <div className="space-y-4 mb-4">
+      <h3 className="text-lg font-semibold">Warnings</h3>
       
-      {capacityWarnings.length > 0 && (
-        <div className="bg-red-50 border border-red-400 text-red-800 rounded-md p-4 my-3">
-          <h4 className="text-red-800 font-semibold">Kapazitätsprobleme</h4>
-          <div>
-            <p className="mb-2">Das Zielgleis hat nicht genügend Kapazität für die angegebenen Waggons:</p>
-            <ul className="list-disc pl-5 mb-2 text-sm">
-              {capacityWarnings.map((warning, index) => (
-                <li key={index}>
-                  <div className="font-medium">{warning.message}</div>
-                  {warning.details && (
-                    <div className="text-xs mt-1">
-                      <div>Gleis-Kapazität: {warning.details.trackLength}m</div>
-                      <div>Aktuelle Belegung: {warning.details.currentUsage}m</div>
-                      <div>Benötigte Länge: {warning.details.requiredLength}m</div>
-                      <div>Verfügbar: {warning.details.availableSpace}m</div>
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
+      {Object.entries(groupedWarnings).map(([type, typeWarnings]) => (
+        <div key={type} className="space-y-2">
+          {type !== 'general' && (
+            <h4 className="text-md font-medium capitalize">{type.replace('_', ' ')} Warnings</h4>
+          )}
+          
+          {typeWarnings.map((warning, index) => (
+            <Alert key={index} variant="warning" className="bg-yellow-50 border-yellow-200">
+              {getWarningIcon(warning)}
+              <AlertTitle>{getWarningTitle(warning)}</AlertTitle>
+              <AlertDescription>{warning.message}</AlertDescription>
+              
+              {/* Render additional details based on warning type */}
+              {warning.type === 'future_trips' && warning.details?.trips && (
+                <div className="mt-2 space-y-1">
+                  <p className="text-sm font-medium">Affected Trips:</p>
+                  <ul className="text-sm space-y-1">
+                    {warning.details.trips.slice(0, 3).map((trip: any, i: number) => (
+                      <li key={i} className="flex items-center gap-1">
+                        <Clock className="h-4 w-4" />
+                        <span>
+                          {new Date(trip.datetime).toLocaleString()} - {trip.type} trip
+                        </span>
+                      </li>
+                    ))}
+                    {warning.details.trips.length > 3 && (
+                      <li>...and {warning.details.trips.length - 3} more</li>
+                    )}
+                  </ul>
+                </div>
+              )}
+              
+              {(warning.type === 'source_restriction' || warning.type === 'dest_restriction') && 
+               warning.details?.restrictions && (
+                <div className="mt-2">
+                  <p className="text-sm font-medium">Active Restrictions:</p>
+                  <ul className="text-sm">
+                    {warning.details.restrictions.slice(0, 3).map((restriction: any, i: number) => (
+                      <li key={i} className="flex items-center gap-1">
+                        <AlertTriangle className="h-4 w-4" />
+                        <span>
+                          {restriction.comment || 'No details available'}
+                        </span>
+                      </li>
+                    ))}
+                    {warning.details.restrictions.length > 3 && (
+                      <li>...and {warning.details.restrictions.length - 3} more</li>
+                    )}
+                  </ul>
+                </div>
+              )}
+            </Alert>
+          ))}
         </div>
-      )}
+      ))}
       
-      {restrictionWarnings.length > 0 && (
-        <div className="bg-red-50 border border-red-400 text-red-800 rounded-md p-4 my-3">
-          <h4 className="text-red-800 font-semibold">Aktive Einschränkungen</h4>
-          <div>
-            <p className="mb-2">Es gibt aktive Einschränkungen für die gewählte Zeit und das Gleis:</p>
-            <ul className="list-disc pl-5 mb-2 text-sm">
-              {restrictionWarnings.map((warning, index) => (
-                <li key={index}>
-                  <div className="font-medium">{warning.message}</div>
-                  {warning.details?.restrictions && (
-                    <div className="text-xs mt-1">
-                      {warning.details.restrictions.map((r: any, i: number) => (
-                        <div key={i} className="mb-1 p-1 border-l-2 border-red-300 pl-2">
-                          <div>{r.type === 'no_entry' ? 'Keine Einfahrt' : 'Keine Ausfahrt'}</div>
-                          <div>Grund: {r.comment || 'Nicht angegeben'}</div>
-                          <div>Von: {r.restriction_date} {r.time_from || '00:00'}</div>
-                          <div>Bis: {r.restriction_date} {r.time_to || '23:59'}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      )}
-      
-      {duplicateWarnings.length > 0 && (
-        <div className="bg-yellow-50 border border-yellow-400 text-yellow-800 rounded-md p-4 my-3">
-          <h4 className="text-yellow-800 font-semibold">Doppelte Waggonnummern</h4>
-          <div>
-            <p className="mb-2">Einige Waggonnummern existieren bereits im System:</p>
-            <ul className="list-disc pl-5 mb-2 text-sm">
-              {duplicateWarnings.map((warning, index) => (
-                <li key={index}>
-                  <div className="font-medium">{warning.message}</div>
-                  {warning.details?.duplicateNumbers && (
-                    <div className="text-xs mt-1">
-                      <div>Doppelte Nummern: {warning.details.duplicateNumbers.join(', ')}</div>
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      )}
-      
-      {dateWarnings.length > 0 && (
-        <div className="bg-yellow-50 border border-yellow-400 text-yellow-800 rounded-md p-4 my-3">
-          <h4 className="text-yellow-800 font-semibold">Datumsprobleme</h4>
-          <div>
-            <ul className="list-disc pl-5 mb-2 text-sm">
-              {dateWarnings.map((warning, index) => (
-                <li key={index}>
-                  <div className="font-medium">{warning.message}</div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      )}
-      
-      {otherWarnings.length > 0 && (
-        <div className="bg-gray-50 border border-gray-300 rounded-md p-4 my-3">
-          <h4 className="font-semibold">Weitere Warnungen</h4>
-          <div>
-            <ul className="list-disc pl-5 mb-2 text-sm">
-              {otherWarnings.map((warning, index) => (
-                <li key={index}>{warning.message}</li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      )}
-      
-      <div className="flex justify-end space-x-3 mt-6">
-        <Button
-          onClick={onCancel}
-          variant="outline"
-        >
-          Abbrechen
-        </Button>
-        <Button
-          onClick={onProceedAnyway}
-          variant="destructive"
-        >
-          Trotzdem fortfahren
-        </Button>
-      </div>
+      <p className="text-sm text-gray-600">
+        These warnings don't prevent the trip from being created, but may cause operational issues.
+        Please review and confirm if you want to proceed despite these warnings.
+      </p>
     </div>
   );
 };
+
+// Helper function to get the appropriate icon based on warning type
+function getWarningIcon(warning: ValidationWarning) {
+  switch (warning.type) {
+    case 'future_trips':
+      return <Clock className="h-4 w-4 mr-2" />;
+    case 'source_restriction':
+    case 'dest_restriction':
+      return <AlertTriangle className="h-4 w-4 mr-2" />;
+    default:
+      return <AlertCircle className="h-4 w-4 mr-2" />;
+  }
+}
+
+// Helper function to get an appropriate title based on warning type
+function getWarningTitle(warning: ValidationWarning) {
+  switch (warning.type) {
+    case 'future_trips':
+      return 'Dependent Trips Warning';
+    case 'source_restriction':
+      return 'Source Track Restriction';
+    case 'dest_restriction':
+      return 'Destination Track Restriction';
+    case 'restriction':
+      return 'Track Restriction';
+    default:
+      return 'Warning';
+  }
+}
 
 export default ValidationWarnings; 

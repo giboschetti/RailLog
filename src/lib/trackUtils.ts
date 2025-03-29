@@ -244,6 +244,197 @@ export async function checkTrackCapacityForTrip(
   wagonLength: number
 ) {
   try {
+    console.log(`Checking track capacity for trip at ${tripDateTime}`);
+    
+    // Get track information
+    const { data: trackData, error: trackError } = await supabase
+      .from('tracks')
+      .select('*')
+      .eq('id', trackId)
+      .single();
+    
+    if (trackError) throw trackError;
+    if (!trackData) throw new Error('Track not found');
+    
+    const track = trackData;
+    
+    // Track's useful_length
+    const trackLength = track.useful_length || 0;
+    
+    // Skip capacity check if track has unlimited capacity
+    if (trackLength === 0) {
+      return {
+        hasCapacity: true,
+        currentUsage: 0,
+        availableLength: 0, // Unlimited
+        trackLength: 0,
+        additionalLength: wagonLength,
+        track
+      };
+    }
+    
+    // Parse the trip datetime for time-based lookups
+    const tripTime = new Date(tripDateTime);
+    
+    // Create time buffer objects (1 hour before and after) - using 2-hour window consistent with tripValidation.ts
+    const timeBufferBefore = new Date(tripTime);
+    timeBufferBefore.setHours(tripTime.getHours() - 1);
+    
+    const timeBufferAfter = new Date(tripTime);
+    timeBufferAfter.setHours(tripTime.getHours() + 1);
+    
+    console.log('Using time window:', {
+      tripTime: tripTime.toISOString(),
+      timeBufferRange: `${timeBufferBefore.toISOString()} to ${timeBufferAfter.toISOString()}`
+    });
+    
+    // 1. Get wagons that will be on the track at the time of the trip
+    const { data: currentWagonsData, error: currentWagonsError } = await supabase
+      .from('wagons')
+      .select('id, length')
+      .eq('current_track_id', trackId);
+    
+    if (currentWagonsError) throw currentWagonsError;
+    
+    // Current wagons on the track
+    const currentWagons = currentWagonsData || [];
+    
+    // 2. Get all future trips affecting this track before the trip time
+    // For internal trips or departures that would remove wagons
+    const { data: departureTripData, error: departureTripError } = await supabase
+      .from('trips')
+      .select(`
+        id,
+        datetime,
+        source_track_id,
+        type,
+        trip_wagons(wagon_id)
+      `)
+      .eq('is_planned', true)
+      .eq('source_track_id', trackId)
+      .lt('datetime', tripTime.toISOString())
+      .gt('datetime', new Date().toISOString())
+      .or('type.eq.internal,type.eq.departure')
+      .order('datetime', { ascending: true });
+    
+    if (departureTripError) throw departureTripError;
+    
+    // 3. Get all future trips that would add wagons to this track before the trip time
+    const { data: arrivalTripData, error: arrivalTripError } = await supabase
+      .from('trips')
+      .select(`
+        id,
+        datetime,
+        dest_track_id,
+        type,
+        trip_wagons(wagon_id)
+      `)
+      .eq('is_planned', true)
+      .eq('dest_track_id', trackId)
+      .lt('datetime', tripTime.toISOString())
+      .gt('datetime', new Date().toISOString())
+      .or('type.eq.internal,type.eq.delivery')
+      .order('datetime', { ascending: true });
+    
+    if (arrivalTripError) throw arrivalTripError;
+    
+    // 4. Check for trips that would conflict with our target trip time
+    // (trips within the 2-hour window)
+    const { data: conflictTripData, error: conflictTripError } = await supabase
+      .from('trips')
+      .select(`
+        id,
+        datetime,
+        type
+      `)
+      .eq('is_planned', true)
+      .or(`source_track_id.eq.${trackId},dest_track_id.eq.${trackId}`)
+      .gte('datetime', timeBufferBefore.toISOString())
+      .lte('datetime', timeBufferAfter.toISOString());
+    
+    if (conflictTripError) throw conflictTripError;
+    
+    const hasTimeConflicts = (conflictTripData || []).length > 0;
+    if (hasTimeConflicts) {
+      console.log('Found time conflicts:', conflictTripData);
+    }
+    
+    // 5. Calculate expected track usage at trip time
+    
+    // First, identify wagons that will be removed
+    const wagonsToRemove = new Set<string>();
+    departureTripData?.forEach(trip => {
+      trip.trip_wagons?.forEach((tw: any) => {
+        wagonsToRemove.add(tw.wagon_id);
+      });
+    });
+    
+    // Filter current wagons to remove those that will be gone
+    const remainingWagons = currentWagons.filter(wagon => !wagonsToRemove.has(wagon.id));
+    
+    // Add lengths of wagons that will arrive before the trip
+    const wagonsToAdd: { length: number }[] = [];
+    arrivalTripData?.forEach(trip => {
+      // We need to count how many wagons will be added - for simplicity
+      // we'll estimate based on trip_wagons count, using average length
+      const wagonCount = trip.trip_wagons?.length || 0;
+      const avgWagonLength = 15; // Default average wagon length
+      
+      // Add estimated length for each wagon
+      for (let i = 0; i < wagonCount; i++) {
+        wagonsToAdd.push({ length: avgWagonLength });
+      }
+    });
+    
+    // Calculate current usage at trip time
+    const currentUsage = [
+      ...remainingWagons,
+      ...wagonsToAdd
+    ].reduce((total, wagon) => total + (wagon.length || 0), 0);
+    
+    // Calculate available space
+    const availableLength = trackLength - currentUsage;
+    
+    // Check if adding these wagons would exceed capacity
+    const hasCapacity = currentUsage + wagonLength <= trackLength;
+    
+    console.log(`Time-based track capacity check for trip:`, {
+      trackId,
+      trackLength,
+      tripTime: tripTime.toISOString(),
+      currentWagonsCount: currentWagons.length,
+      wagonsToRemoveCount: wagonsToRemove.size,
+      wagonsToAddCount: wagonsToAdd.length,
+      calculatedUsage: currentUsage,
+      additionalLength: wagonLength,
+      availableLength,
+      hasCapacity,
+      hasTimeConflicts
+    });
+    
+    return {
+      hasCapacity,
+      currentUsage,
+      availableLength,
+      trackLength,
+      additionalLength: wagonLength,
+      track,
+      timeBasedCheck: true,
+      hasTimeConflicts
+    };
+  } catch (error: any) {
+    console.error('Error checking track capacity for trip:', error);
+    
+    // Fall back to simple static check on failure
+    return checkTrackCapacityStatic(trackId, wagonLength);
+  }
+}
+
+/**
+ * Simple static capacity check (not time-based) as a fallback
+ */
+async function checkTrackCapacityStatic(trackId: string, wagonLength: number) {
+  try {
     // Get track information
     const { data: trackData, error: trackError } = await supabase
       .from('tracks')
@@ -274,29 +465,17 @@ export async function checkTrackCapacityForTrip(
     // Skip check if track has unlimited capacity (useful_length = 0)
     const hasCapacity = trackLength === 0 || currentUsage + wagonLength <= trackLength;
     
-    // Calculate available length
-    const availableLength = trackLength - currentUsage;
-    
-    console.log(`Track capacity check for trip:`, {
-      trackId,
-      trackLength,
-      currentUsage,
-      wagonLength,
-      availableLength,
-      tripDateTime,
-      hasCapacity
-    });
-    
     return {
       hasCapacity,
       currentUsage,
-      availableLength,
+      availableLength: trackLength - currentUsage,
       trackLength,
       additionalLength: wagonLength,
-      track
+      track,
+      staticCheck: true
     };
   } catch (error: any) {
-    console.error('Error checking track capacity for trip:', error);
+    console.error('Error in static capacity check:', error);
     return {
       hasCapacity: false,
       error: error.message,
@@ -1048,5 +1227,99 @@ export function formatRestrictionForDisplay(restriction: any): {
     dateRange,
     fromDateTime,
     toDateTime
+  };
+}
+
+/**
+ * Quick validation for drag-and-drop operations
+ * This is a lightweight version of validateInternalTrip without DB calls
+ * @param sourceTrackId Source track ID
+ * @param destTrackId Destination track ID
+ * @param selectedWagons Array of wagons being moved
+ * @param tracks Array of tracks (for quick capacity lookup)
+ * @returns ValidationResult with quick checks
+ */
+export function validateDragDrop(
+  sourceTrackId: string,
+  destTrackId: string,
+  selectedWagons: Array<{id: string, length: number}>,
+  tracks: Array<{id: string, useful_length: number, wagons?: Array<{id: string, length: number}>}>
+) {
+  const errors: Array<{field: string, message: string}> = [];
+  
+  // Basic validation
+  if (!sourceTrackId) {
+    errors.push({
+      field: 'sourceTrackId',
+      message: 'Source track is required'
+    });
+  }
+  
+  if (!destTrackId) {
+    errors.push({
+      field: 'destTrackId',
+      message: 'Destination track is required'
+    });
+  }
+  
+  if (sourceTrackId === destTrackId) {
+    errors.push({
+      field: 'destTrackId',
+      message: 'Source and destination tracks must be different'
+    });
+  }
+  
+  if (!selectedWagons || selectedWagons.length === 0) {
+    errors.push({
+      field: 'selectedWagons',
+      message: 'At least one wagon must be selected'
+    });
+  }
+  
+  // If there are basic validation errors, return early
+  if (errors.length > 0) {
+    return {
+      isValid: false,
+      errors,
+      warnings: []
+    };
+  }
+  
+  // Quick capacity check without database calls
+  // Find destination track in provided tracks array
+  const destTrack = tracks.find(t => t.id === destTrackId);
+  
+  if (destTrack) {
+    // Skip capacity check if track has unlimited capacity
+    if (destTrack.useful_length > 0) {
+      // Calculate total length of wagons being moved
+      const totalWagonLength = selectedWagons.reduce(
+        (total, wagon) => total + (wagon.length || 0), 
+        0
+      );
+      
+      // Calculate current usage of destination track
+      const currentWagons = destTrack.wagons || [];
+      const currentUsage = currentWagons.reduce(
+        (total, wagon) => total + (wagon.length || 0),
+        0
+      );
+      
+      // Check if adding these wagons would exceed capacity
+      const availableLength = destTrack.useful_length - currentUsage;
+      
+      if (totalWagonLength > availableLength) {
+        errors.push({
+          field: 'destTrackId',
+          message: `Insufficient capacity on destination track. Available: ${availableLength}m, Required: ${totalWagonLength}m.`
+        });
+      }
+    }
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings: [] // For quick validation, we skip generating warnings
   };
 } 

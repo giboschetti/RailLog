@@ -9,6 +9,7 @@ Eine webbasierte Anwendung für Logistikmanagement im Bahnbau. Das Projekt visua
 - Planung und Kontrolle von Transportbewegungen (Trips)
 - Verwaltung von Restriktionen für Ein- und Ausfahrten
 - Export von Planungs- und Echtdaten
+- Zeitbasierte Kapazitätsplanung (neue Funktion)
 
 ## Technischer Stack
 
@@ -54,4 +55,20 @@ npm run start
 
 ## Lizenz
 
-Dieses Projekt ist proprietär und für den internen Gebrauch bestimmt. 
+Dieses Projekt ist proprietär und für den internen Gebrauch bestimmt.
+
+## Neueste Features
+
+### Zeitbasierte Kapazitätsplanung
+
+Die Anwendung wurde mit einer zeitbasierten Kapazitätsplanung erweitert:
+
+- Prüfung von Gleiskapazität basierend auf geplanten Trips und Zeiten
+- Konflikterkennung für überlappende Trips (2-Stunden-Fenster)
+- Warnungen für mehrere Trips am selben Tag
+- Verbessertes Tracking von Waggonverfügbarkeit
+
+### Testseite für Zeitplanung
+
+Eine neue Testseite wurde hinzugefügt, um die zeitbasierte Planung zu testen und zu demonstrieren.
+Diese ist unter `/schedule-test` verfügbar. 

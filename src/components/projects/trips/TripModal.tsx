@@ -9,7 +9,7 @@ import ConfirmDialog from '@/components/ui/confirm-dialog';
 import InternalTripWagonSelector from './InternalTripWagonSelector';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { validateDelivery } from '@/lib/tripValidation';
+import { validateDelivery, validateInternalTrip, InternalTripData, DeliveryTripData, ValidationError } from '@/lib/tripValidation';
 import { ValidationWarning } from '@/lib/tripValidation';
 import ValidationWarnings from './ValidationWarnings';
 import { checkTrackCapacityForTrip } from '@/lib/trackUtils';
@@ -62,8 +62,10 @@ const TripModal: React.FC<TripModalProps> = ({
   const [restrictionsDetails, setRestrictionsDetails] = useState<any>(null);
   const [validated, setValidated] = useState(false);
 
-  // Add state for warnings
+  // Add state variables for validation
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
   const [validationWarnings, setValidationWarnings] = useState<ValidationWarning[]>([]);
+  const [showWarningDialog, setShowWarningDialog] = useState(false);
 
   // Helper function to format date for input field
   const formatDateForInput = (dateString?: string) => {
@@ -567,110 +569,83 @@ const TripModal: React.FC<TripModalProps> = ({
     return { hasCapacity: currentUsage + additionalLength <= trackLength };
   };
 
-  const validateTrip = async (skipCapacityCheck: boolean = false): Promise<boolean> => {
+  const validateTrip = async (): Promise<boolean> => {
+    setValidationWarnings([]);
+    
     try {
-      // Skip validation if the form was already validated
-      if (validated) return true;
-      
-      // For internal trips, check track capacity on destination track
-      if (type === 'internal' && destTrackId && wagonGroups.length > 0 && !skipCapacityCheck) {
-        const wagonsLength = getWagonsLength();
+      // Validate based on trip type
+      if (type === 'delivery') {
+        // Use dedicated delivery validation
+        const deliveryData: DeliveryTripData = {
+          projectId: project.id,
+          dateTime: dateTime,
+          destTrackId: destTrackId,
+          wagonGroups,
+          transportPlanNumber: transportPlanNumber,
+          isPlanned
+        };
         
-        // Get current wagons on destination track
-        const destTrackData = await getTrackDetails(destTrackId);
-        if (!destTrackData) {
-          toast({
-            title: "Fehler",
-            description: "Fehler beim Abrufen der Gleisinformationen",
-            variant: "destructive"
-          });
+        const validationResult = await validateDelivery(deliveryData);
+        
+        // If validation failed with errors, show them
+        if (!validationResult.isValid) {
+          setError(validationResult.errors[0].message);
           return false;
         }
         
-        // Calculate the current usage
-        const currentUsage = destTrackData.wagons.reduce((sum: number, w: any) => sum + w.length, 0);
-        const trackLength = destTrackData.useful_length || 0;
-        
-        // Calculate capacity
-        const currentCapacityDetails = {
-          track: {
-            id: destTrackData.id,
-            name: destTrackData.name,
-            useful_length: trackLength
-          },
-          current_usage: currentUsage,
-          additional_length: wagonsLength,
-          total_after: currentUsage + wagonsLength,
-          has_capacity: false // will be set below
-        };
-        
-        // Check if there's enough capacity
-        const capacityResult = checkCapacity(
-          trackLength,
-          currentUsage,
-          wagonsLength
-        );
-        
-        currentCapacityDetails.has_capacity = capacityResult.hasCapacity;
-        
-        setCapacityDetails(currentCapacityDetails);
-        
-        if (!capacityResult.hasCapacity) {
-          setHasCapacityIssue(true);
-          
-          // Show capacity error dialog
+        // If there are warnings, store them for the user to acknowledge
+        if (validationResult.warnings.length > 0) {
+          setValidationWarnings(validationResult.warnings);
           setShowConfirmDialog(true);
           return false;
         }
-      }
-      
-      // Check for restrictions regardless of trip type
-      const { checkTripRestrictionsSimplified } = await import('@/lib/trackUtils');
-      const restrictionsCheck = await checkTripRestrictionsSimplified(
-        type,
-        dateTime,
-        sourceTrackId,
-        destTrackId
-      );
-      
-      if (restrictionsCheck.hasRestrictions) {
-        setHasRestrictions(true);
-        setRestrictionsDetails(restrictionsCheck);
-        setShowConfirmDialog(true);
-        return false; // Return false to prevent form submission
-      }
-      
-      return true; // No issues, validation passed
-    } catch (error) {
-      console.error('Error during validation:', error);
-      toast({
-        title: "Fehler bei der Validierung",
-        description: "Es ist ein Fehler bei der Überprüfung der Fahrt aufgetreten.",
-        variant: "destructive"
-      });
-      return false;
-    }
-  };
-
-  // Helper function to get track details with wagons
-  const getTrackDetails = async (trackId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from('tracks')
-        .select(`
-          id,
-          name,
-          useful_length,
-          wagons ( id, length )
-        `)
-        .eq('id', trackId)
-        .single();
+      } else if (type === 'internal') {
+        // Use dedicated internal trip validation
+        const internalData: InternalTripData = {
+          projectId: project.id,
+          dateTime: dateTime,
+          sourceTrackId,
+          destTrackId,
+          selectedWagons: selectedExistingWagons,
+          isPlanned
+        };
         
-      if (error) throw error;
-      return data;
-    } catch (error) {
-      console.error('Error getting track details:', error);
-      return null;
+        const validationResult = await validateInternalTrip(internalData);
+        
+        // If validation failed with errors, show them
+        if (!validationResult.isValid) {
+          setError(validationResult.errors[0].message);
+          return false;
+        }
+        
+        // If there are warnings, store them for the user to acknowledge
+        if (validationResult.warnings.length > 0) {
+          setValidationWarnings(validationResult.warnings);
+          setShowConfirmDialog(true);
+          return false;
+        }
+      } else if (type === 'departure') {
+        // Basic validation for departure trips
+        if (!sourceTrackId) {
+          setError('Source track is required for departures');
+          return false;
+        }
+        
+        if (!selectedExistingWagons || selectedExistingWagons.length === 0) {
+          setError('At least one wagon must be selected');
+          return false;
+        }
+        
+        // Additional departure-specific validation can be added here
+        // or in a dedicated validateDeparture function similar to the others
+      }
+      
+      // If we made it here, validation passed
+      return true;
+    } catch (error: any) {
+      console.error('Error validating trip:', error);
+      setError(`Validation error: ${error.message}`);
+      return false;
     }
   };
 
@@ -957,14 +932,31 @@ const TripModal: React.FC<TripModalProps> = ({
       {showConfirmDialog && validationWarnings.length > 0 ? (
         <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
           <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
-            <ValidationWarnings 
-              warnings={validationWarnings}
-              onProceedAnyway={() => {
-                setValidated(true);
-                handleConfirmCapacityIssue();
-              }}
-              onCancel={() => setShowConfirmDialog(false)}
-            />
+            <DialogHeader>
+              <DialogTitle>Validation Warnings</DialogTitle>
+            </DialogHeader>
+            
+            <div className="py-4">
+              <ValidationWarnings warnings={validationWarnings} />
+              
+              <div className="flex justify-end space-x-3 mt-4">
+                <Button
+                  onClick={() => setShowConfirmDialog(false)}
+                  variant="outline"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => {
+                    setValidated(true);
+                    handleConfirmCapacityIssue();
+                  }}
+                  variant="destructive"
+                >
+                  Proceed Anyway
+                </Button>
+              </div>
+            </div>
           </DialogContent>
         </Dialog>
       ) : showConfirmDialog && (
@@ -1020,6 +1012,41 @@ const TripModal: React.FC<TripModalProps> = ({
           confirmText="Trotzdem fortfahren"
           variant="warning"
         />
+      )}
+
+      {/* Warning Dialog */}
+      {showWarningDialog && (
+        <Dialog open={showWarningDialog} onOpenChange={setShowWarningDialog}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>Trip Validation Warnings</DialogTitle>
+            </DialogHeader>
+            
+            <div className="py-4">
+              <ValidationWarnings warnings={validationWarnings} />
+              
+              <div className="flex justify-end space-x-3 mt-4">
+                <Button
+                  onClick={() => setShowWarningDialog(false)}
+                  variant="outline"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => {
+                    setShowWarningDialog(false);
+                    // Create a synthetic form event instead of using a raw Event
+                    const syntheticEvent = { preventDefault: () => {} } as React.FormEvent;
+                    handleSubmit(syntheticEvent, true); // Skip validation when submitting after warning acknowledgment
+                  }}
+                  variant="destructive"
+                >
+                  Proceed Anyway
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );
