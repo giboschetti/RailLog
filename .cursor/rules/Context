@@ -1,0 +1,103 @@
+# Rail Log: Track and Wagon Management Application
+
+## Overview and Purpose
+
+Rail Log is a web application designed for logistics management in railway construction projects. The application visualizes the location and movement of railroad wagons across various tracks and logistics nodes on a timeline. It provides both planning and monitoring functionality, enabling users to effectively manage construction logistics.
+
+## Core Concepts
+
+1. **Tracks and Nodes**
+   - Nodes represent physical locations like construction sites or stations
+   - Each node contains multiple tracks with defined lengths
+   - Tracks have a capacity limit based on their useful length
+
+2. **Wagons**
+   - Wagons have properties like type, length, content, and project assignment
+   - Wagons occupy space on tracks
+   - Each wagon has a current location (track) and movement history
+
+3. **Trips (Movements)**
+   - Three types:
+     - **Deliveries**: Bringing new wagons onto a track
+     - **Departures**: Removing wagons from the system
+     - **Internal movements**: Moving wagons between tracks (handled via drag-and-drop)
+   - Trips can be planned (future) or executed (past/current)
+   - System prevents exceeding track capacity and respects restrictions
+
+4. **Restrictions**
+   - Time-based limitations on track or node access
+   - Types: No entry or no exit
+   - Prevents scheduling trips that would violate these restrictions
+
+## Key Functionalities
+
+1. **Timeline View**
+   - Interactive visualization showing tracks and wagons
+   - Time-based display: shows wagons at their positions at the selected date/time
+   - Allows drag-and-drop for creating internal movements
+
+2. **Trip Management**
+   - Form-based interface for deliveries and departures
+   - Validation checks to ensure track capacity and restriction compliance
+   - Automatic status assignment based on date (planned vs. executed)
+
+3. **Track Occupancy**
+   - Visual representation of track usage and available capacity
+   - Prevents overbooking of tracks
+
+4. **Wagon Tracking**
+   - Tracks wagon position over time
+   - Maintains history of movements
+   - Shows current location for each wagon
+
+## Technical Implementation
+
+1. **Database Design**
+   - Time-based wagon tracking through trajectories
+   - SQL functions for retrieving wagons at specific timestamps
+   - Trigger functions to ensure data consistency
+
+2. **Frontend Features**
+   - Interactive timeline with draggable wagons
+   - Date and time selection to view past or future states
+   - Forms for planning new deliveries and departures
+
+3. **User Experience Flow**
+   - Users select a date and time to view the system state
+   - They can drag wagons between tracks to create internal movements
+   - They use forms to schedule deliveries and departures
+   - The system validates all operations to ensure capacity and restriction compliance
+
+## Implementation Challenges Addressed
+
+1. **Time-based Wagon Display**
+   - Showing wagons at their correct positions for any selected date and time
+   - Handling both historical data and future plans
+
+2. **Preventing Duplicates**
+   - Ensuring each wagon appears only once in the UI
+   - Proper deduplication based on latest trajectory record
+
+3. **Track Capacity Management**
+   - Validating that enough space is available on tracks
+   - Preventing overloading of tracks
+
+4. **Current Track ID Maintenance**
+   - Ensuring the `current_track_id` field for wagons is always up-to-date
+   - Multiple layers of protection to ensure data consistency
+
+## Development Improvements
+
+1. **Simplified Trip Creation**
+   - Internal trips are now exclusively handled through intuitive drag-and-drop
+   - Delivery and departure trips use form-based input
+
+2. **Enhanced Data Consistency**
+   - Wagon position tracking relies on trajectories for accurate historical data
+   - Current track ID is updated through triggers and frontend logic
+
+3. **Performance Optimizations**
+   - Efficient database queries for timeline data
+   - Deduplication of wagons to prevent visual duplicates
+
+This application provides construction logistics managers with a comprehensive tool for planning and monitoring wagon movements, helping them optimize resource allocation and maintain an accurate overview of their construction logistics.

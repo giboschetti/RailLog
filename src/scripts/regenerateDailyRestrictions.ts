@@ -15,7 +15,8 @@
 import { supabase } from '@/lib/supabase';
 import { expandRestriction } from '@/lib/trackUtils';
 
-async function regenerateDailyRestrictions() {
+// Export the function so it can be used elsewhere
+export async function regenerateDailyRestrictions() {
   console.log('Regenerating all daily_restrictions from original restrictions...');
   
   try {
@@ -124,7 +125,15 @@ async function regenerateDailyRestrictions() {
   }
 }
 
-// Execute the regeneration
-regenerateDailyRestrictions()
-  .then(() => console.log('Script execution complete'))
-  .catch(err => console.error('Script execution failed:', err)); 
+// Run the regeneration function if this module is invoked directly
+if (require.main === module) {
+  regenerateDailyRestrictions()
+    .then(() => {
+      console.log('Regeneration complete');
+      process.exit(0);
+    })
+    .catch(error => {
+      console.error('Regeneration failed:', error);
+      process.exit(1);
+    });
+} 

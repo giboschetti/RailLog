@@ -1,5 +1,6 @@
 import { type ClassValue, clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { supabase } from './supabase';
 
 /**
  * Combines multiple class names using clsx and tailwind-merge
@@ -91,3 +92,38 @@ export function getEndOfDay(date: Date): Date {
 
 // Re-export from supabase
 export * from './supabase';
+
+/**
+ * Checks if the daily_restrictions table exists and is properly configured
+ * This function is used before expanding restrictions into daily records
+ * @param supabaseClient Optional Supabase client
+ * @returns Object with success status and error message if any
+ */
+export async function checkDailyRestrictionsTable(supabaseClient: any = supabase) {
+  try {
+    // Check if the table exists by querying it
+    const { count, error } = await supabaseClient
+      .from('daily_restrictions')
+      .select('*', { count: 'exact', head: true });
+    
+    if (error) {
+      console.error('Error checking daily_restrictions table:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+    
+    // If we got here, the table exists and is accessible
+    return {
+      success: true,
+      count: count
+    };
+  } catch (err: any) {
+    console.error('Exception checking daily_restrictions table:', err);
+    return {
+      success: false,
+      error: err.message || 'Unknown error checking daily_restrictions table'
+    };
+  }
+}

@@ -5,10 +5,18 @@ import { getEnhancedTrackOccupancy, TrackWithOccupancy, WagonOnTrack } from '@/l
 import { supabase } from '@/lib/supabase';
 import { Node } from '@/lib/supabase';
 import { useToast } from '@/components/ui/use-toast';
-import { formatDateTime } from '@/lib/utils';
+import { formatDateTime, cn } from '@/lib/utils';
 import { getTrackWagonsFromCurrentTrackId, getTrackWagonsAtTime } from '@/lib/trackUtils';
 import { useWagonDragDrop } from '@/hooks/useWagonDragDrop';
 import { useRouter } from 'next/navigation';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 
 // Define a utility function to generate colors based on construction site ID
 const getColorForConstructionSite = (siteId: string | undefined): string => {
@@ -49,6 +57,7 @@ interface TimelineTrackProps {
   onRefresh?: () => void;
   projectId: string;
   selectedDateTime?: Date;  // Add this new prop for the selected time
+  tracks?: Array<{ id: string; name: string }>;  // Add optional tracks prop for identifying track names
 }
 
 // Helper function to deduplicate wagons by ID
@@ -71,6 +80,7 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
   onRefresh,
   projectId,
   selectedDateTime,
+  tracks = [],
 }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +93,9 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
   const { toast } = useToast();
   const { moveWagons, isMoving } = useWagonDragDrop(projectId || '');
   const router = useRouter();
+  const [showRestrictionDialog, setShowRestrictionDialog] = useState(false);
+  const [restrictionDetails, setRestrictionDetails] = useState<{restrictions?: any[]} | null>(null);
+  const [pendingWagonMove, setPendingWagonMove] = useState<any>(null);
 
   // Calculate start and end dates for the current day
   const startDate = useMemo(() => {
@@ -198,6 +211,17 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
       const data = JSON.parse(e.dataTransfer.getData('application/json'));
       const { wagonId, sourceTrackId, date: dragDate } = data;
       
+      // Validation checks
+      if (!wagonId || !sourceTrackId) {
+        console.error('Invalid drag data:', data);
+        toast({
+          title: "Fehler",
+          description: "Ungültige Daten für die Waggonbewegung",
+          variant: "destructive"
+        });
+        return;
+      }
+      
       console.log(`Handling drop of wagon ${wagonId} from track ${sourceTrackId} to track ${track.id}`);
       
       // Don't do anything if dropping on the same track
@@ -263,35 +287,19 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
         return;
       }
       
-      if (hasRestrictions && restrictionDetails) {
-        // There are restrictions - do not allow the move
-        const restrictionTypes = restrictionDetails.restrictions.map((r: any) => 
-          r.restriction_type === 'no_entry' ? 'Einfahrt verboten' : 'Ausfahrt verboten'
-        );
-        
-        // Format the restriction information for better user feedback
-        const restrictionInfo = restrictionDetails.restrictions.map((r: any) => {
-          let timeInfo = '';
-          if (r.start_datetime && r.end_datetime) {
-            const start = new Date(r.start_datetime);
-            const end = new Date(r.end_datetime);
-            
-            if (r.repetition_pattern === 'once') {
-              timeInfo = `${start.toLocaleDateString()} bis ${end.toLocaleDateString()}`;
-            } else {
-              timeInfo = `${start.toLocaleTimeString()} bis ${end.toLocaleTimeString()} (${r.repetition_pattern})`;
-            }
-          }
-          
-          return `${r.restriction_type === 'no_entry' ? 'Einfahrt verboten' : 'Ausfahrt verboten'} (${timeInfo})`;
-        }).join('\n');
-        
-        toast({
-          title: "Bewegung nicht möglich",
-          description: `Diese Waggonbewegung kann wegen aktiver Einschränkungen nicht durchgeführt werden:\n${restrictionInfo}`,
-          variant: "destructive"
+      if (hasRestrictions && restrictionDetails && restrictionDetails.restrictions && restrictionDetails.restrictions.length > 0) {
+        // Store the restriction details and pending wagon move
+        setRestrictionDetails(restrictionDetails);
+        setPendingWagonMove({
+          sourceTrackId,
+          destTrackId: track.id,
+          wagonId,
+          date,
+          tripDateTime,
+          tripDateTimeISO,
+          sourceNodeName: data.sourceNodeName
         });
-        
+        setShowRestrictionDialog(true);
         setIsSubmitting(false);
         return;
       }
@@ -434,6 +442,130 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
     }
   };
 
+  // Add a cancelRestrictionDialog function for proper cleanup
+  const cancelRestrictionDialog = () => {
+    console.log('Cancelling restriction dialog');
+    setShowRestrictionDialog(false);
+    setPendingWagonMove(null);
+    setIsSubmitting(false);
+    setRestrictionDetails(null);
+  };
+
+  // New function to handle confirmed moves despite restrictions
+  const handleConfirmRestrictedMove = async () => {
+    if (!pendingWagonMove) {
+      cancelRestrictionDialog();
+      return;
+    }
+    
+    const { sourceTrackId, destTrackId, wagonId, tripDateTimeISO, sourceNodeName } = pendingWagonMove;
+    
+    // Close the dialog right away to prevent UI freeze
+    cancelRestrictionDialog();
+    setIsSubmitting(true);
+    
+    try {
+      // Check if this wagon is already in a trip within the same hour
+      console.log(`Checking for existing trips in the time window around ${new Date(tripDateTimeISO).toISOString()}`);
+      
+      const tripHour = new Date(tripDateTimeISO);
+      const hourStart = new Date(tripHour);
+      hourStart.setMinutes(0, 0, 0);
+      const hourEnd = new Date(tripHour);
+      hourEnd.setMinutes(59, 59, 999);
+      
+      const { data: existingTrips, error: tripCheckError } = await supabase
+        .from('trip_wagons')
+        .select(`
+          trip_id,
+          trips!inner(id, datetime, source_track_id, dest_track_id, type)
+        `)
+        .eq('wagon_id', wagonId)
+        .gte('trips.datetime', hourStart.toISOString())
+        .lte('trips.datetime', hourEnd.toISOString());
+      
+      if (tripCheckError) {
+        throw new Error(`Error checking existing trips: ${tripCheckError.message}`);
+      }
+      
+      // If the wagon is already in a trip in this hour, don't allow another move
+      if (existingTrips && existingTrips.length > 0) {
+        console.log(`Wagon ${wagonId} already has trips in this time window:`, existingTrips);
+        toast({
+          title: "Waggon bereits in Bewegung",
+          description: "Dieser Waggon wird in dieser Stunde bereits bewegt und kann nicht erneut verschoben werden.",
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      // Verify the wagon exists and is on the expected track
+      console.log(`Verifying wagon ${wagonId} location`);
+      
+      const { data: wagonCheck, error: wagonCheckError } = await supabase
+        .from('wagons')
+        .select('current_track_id')
+        .eq('id', wagonId)
+        .single();
+      
+      if (wagonCheckError) {
+        throw new Error(`Error checking wagon location: ${wagonCheckError.message}`);
+      }
+      
+      // Accept either the source track from the drag event or null if the wagon is not yet assigned to a track
+      const actualTrackId = wagonCheck?.current_track_id;
+      if (actualTrackId !== sourceTrackId && actualTrackId !== null) {
+        console.error(`Waggon location mismatch: expected track ${sourceTrackId}, but found ${actualTrackId}`);
+        toast({
+          title: "Waggon nicht gefunden",
+          description: `Der Waggon befindet sich möglicherweise nicht mehr auf dem angegebenen Gleis. Bitte aktualisieren Sie die Seite.`,
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      // Execute the move using the wagon drag drop hook
+      const tripId = await moveWagons(
+        sourceTrackId,
+        destTrackId,
+        [wagonId],
+        tripDateTimeISO,
+        undefined, // No existing trip ID
+        false // Not planned, execute immediately
+      );
+      
+      if (!tripId) {
+        throw new Error("Failed to create trip - no trip ID returned");
+      }
+      
+      console.log(`Successfully created trip ${tripId} for wagon ${wagonId} despite restrictions`);
+      
+      // Refresh data
+      if (onRefresh) {
+        onRefresh();
+      } else {
+        // Fallback to just refreshing this track
+        router.refresh();
+      }
+      
+      // Show success message
+      toast({
+        title: "Waggon verschoben",
+        description: `Der Waggon wurde trotz Einschränkungen von "${sourceNodeName}" nach "${nodeName}" verschoben.`,
+        variant: "default"
+      });
+    } catch (moveError: any) {
+      console.error("Error during wagon movement:", moveError);
+      toast({
+        title: "Fehler beim Verschieben des Waggons",
+        description: moveError.message || "Ein unerwarteter Fehler ist aufgetreten",
+        variant: "destructive"
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   // Calculate position for current time indicator
   const currentTimePosition = useMemo(() => {
     if (!selectedDateTime || !startDate || !endDate) return 0;
@@ -443,6 +575,36 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
     
     return (elapsedMs / totalMs) * 100;
   }, [selectedDateTime, startDate, endDate]);
+
+  // Add a keyboard event handler for Escape key to close dialog
+  useEffect(() => {
+    const handleEscapeKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && showRestrictionDialog) {
+        setShowRestrictionDialog(false);
+        setPendingWagonMove(null);
+      }
+    };
+
+    document.addEventListener('keydown', handleEscapeKey);
+    return () => {
+      document.removeEventListener('keydown', handleEscapeKey);
+    };
+  }, [showRestrictionDialog]);
+
+  // Add a cleanup effect to reset dialog state on unmount
+  useEffect(() => {
+    // Force the dialog to be closed on initial mount
+    setShowRestrictionDialog(false);
+    setRestrictionDetails(null);
+    setPendingWagonMove(null);
+    
+    // Clean up on unmount
+    return () => {
+      setShowRestrictionDialog(false);
+      setRestrictionDetails(null);
+      setPendingWagonMove(null);
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -474,135 +636,272 @@ const TimelineTrack: React.FC<TimelineTrackProps> = ({
   } = trackData;
 
   return (
-    <div 
-      className={`relative mb-6 ${
-        isDragOver ? 'border-primary border-2' : 'border-gray-200'
-      } ${isSubmitting ? 'opacity-50 cursor-wait' : ''}`}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
-      <div className="flex items-center justify-between mb-2">
-        <div>
-          <h3 className="font-medium">
-            {nodeName && <span className="text-gray-500">{nodeName} / </span>}
-            {trackData?.name || track.name}
-          </h3>
+    <>
+      <div 
+        className={`relative mb-6 ${
+          isDragOver ? 'border-primary border-2' : 'border-gray-200'
+        } ${isSubmitting ? 'opacity-50 cursor-wait' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <h3 className="font-medium">
+              {nodeName && <span className="text-gray-500">{nodeName} / </span>}
+              {trackData?.name || track.name}
+            </h3>
+          </div>
+          <div className="text-sm text-gray-600">
+            {trackData?.occupiedLength || 0}m / {trackData?.useful_length || track.useful_length}m ({Math.round(trackData?.usagePercentage || 0)}%)
+          </div>
         </div>
-        <div className="text-sm text-gray-600">
-          {trackData?.occupiedLength || 0}m / {trackData?.useful_length || track.useful_length}m ({Math.round(trackData?.usagePercentage || 0)}%)
-        </div>
-      </div>
 
-      {/* Track capacity visualization */}
-      <div className="relative h-16 bg-gray-100 rounded-md overflow-hidden shadow-sm">
-        {/* Occupied area */}
-        <div 
-          className="absolute top-0 h-full bg-blue-200" 
-          style={{ width: `${trackData?.usagePercentage || 0}%` }}
-        ></div>
-        
-        {/* Wagons on track */}
-        <div className="relative h-10 mt-2 w-full">
-          {(() => {
-            // Final wagons deduplication check just before rendering
-            const uniqueWagons = new Map();
-            wagons.forEach(wagon => {
-              if (!wagon.id) return; // Skip wagons without ID
-              uniqueWagons.set(wagon.id, wagon);
-            });
-            
-            const finalWagons = Array.from(uniqueWagons.values());
-            if (finalWagons.length < wagons.length) {
-              console.log(`Final deduplication removed ${wagons.length - finalWagons.length} duplicate wagons before rendering`);
-            }
-            
-            // Now render only the unique wagons
-            return finalWagons
-              .sort((a, b) => (a.position || 0) - (b.position || 0))
-              .map(wagon => {
-                // Calculate position and width based on track dimensions
-                const wagonLength = wagon.length || 0;
-                const trackTotalLength = totalLength || 1;
-                const wagonLeft = (wagon.position || 0) / trackTotalLength * 100;
-                const wagonWidth = wagonLength / trackTotalLength * 100;
-                
-                // Get color based on construction site or project
-                const constructionSiteId = (wagon as any).construction_site_id;
-                const constructionSiteName = constructionSites[constructionSiteId]?.name;
-                const wagonColor = getColorForConstructionSite(constructionSiteId);
-                
-                const wagonData = wagon as any;
-                const wagonTypeName = wagonData.wagon_types?.name || wagonData.custom_type || '';
-                
-                // Get last 4 digits of ID (from number or temp_id)
-                const displayId = wagon.number ? 
-                  wagon.number.slice(-4) : 
-                  (wagon.temp_id ? wagon.temp_id.slice(-4) : wagon.id.slice(-4));
-                
-                // Create readable tooltip with better formatting
-                const tooltipContent = `
+        {/* Track capacity visualization */}
+        <div className="relative h-16 bg-gray-100 rounded-md overflow-hidden shadow-sm">
+          {/* Occupied area */}
+          <div 
+            className="absolute top-0 h-full bg-blue-200" 
+            style={{ width: `${trackData?.usagePercentage || 0}%` }}
+          ></div>
+          
+          {/* Wagons on track */}
+          <div className="relative h-10 mt-2 w-full">
+            {(() => {
+              // Final wagons deduplication check just before rendering
+              const uniqueWagons = new Map();
+              wagons.forEach(wagon => {
+                if (!wagon.id) return; // Skip wagons without ID
+                uniqueWagons.set(wagon.id, wagon);
+              });
+              
+              const finalWagons = Array.from(uniqueWagons.values());
+              if (finalWagons.length < wagons.length) {
+                console.log(`Final deduplication removed ${wagons.length - finalWagons.length} duplicate wagons before rendering`);
+              }
+              
+              // Now render only the unique wagons
+              return finalWagons
+                .sort((a, b) => (a.position || 0) - (b.position || 0))
+                .map(wagon => {
+                  // Calculate position and width based on track dimensions
+                  const wagonLength = wagon.length || 0;
+                  const trackTotalLength = totalLength || 1;
+                  const wagonLeft = (wagon.position || 0) / trackTotalLength * 100;
+                  const wagonWidth = wagonLength / trackTotalLength * 100;
+                  
+                  // Get color based on construction site or project
+                  const constructionSiteId = (wagon as any).construction_site_id;
+                  const constructionSiteName = constructionSites[constructionSiteId]?.name;
+                  const wagonColor = getColorForConstructionSite(constructionSiteId);
+                  
+                  const wagonData = wagon as any;
+                  const wagonTypeName = wagonData.wagon_types?.name || wagonData.custom_type || '';
+                  
+                  // Get last 4 digits of ID (from number or temp_id)
+                  const displayId = wagon.number ? 
+                    wagon.number.slice(-4) : 
+                    (wagon.temp_id ? wagon.temp_id.slice(-4) : wagon.id.slice(-4));
+                  
+                  // Create readable tooltip with better formatting
+                  const tooltipContent = `
 Typ: ${wagonTypeName}
 ID: ${wagon.number || wagon.temp_id || wagon.id}
 Länge: ${wagon.length}m
 ${constructionSiteName ? `Baustelle: ${constructionSiteName}` : ''}
 `.trim();
-                
-                return (
-                  <div
-                    key={wagon.id}
-                    className={`absolute top-0 h-full ${wagonColor} border-r flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
-                    style={{ 
-                      left: `${wagonLeft}%`, 
-                      width: `${wagonWidth}%`,
-                      minWidth: wagonWidth < 1 ? '20px' : '25px' // Adjust minimum size based on relative width
-                    }}
-                    title={tooltipContent}
-                    onClick={() => onWagonSelect && onWagonSelect(wagon.id)}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, wagon)}
-                  >
-                    <div className="flex flex-col items-center justify-center h-full w-full px-0.5">
-                      {/* For larger wagons, show type and construction site */}
-                      {wagonWidth > 6 && (
-                        <span className={`text-white text-center leading-tight font-medium ${wagonWidth <= 12 ? 'text-[9px]' : 'text-xs'}`}>
-                          {wagonTypeName}{constructionSiteName ? ` - ${constructionSiteName.substring(0, 6)}${constructionSiteName.length > 6 ? '...' : ''}` : ''}
+                  
+                  return (
+                    <div
+                      key={wagon.id}
+                      className={`absolute top-0 h-full ${wagonColor} border-r flex flex-col items-center justify-center cursor-pointer transition-opacity hover:opacity-80`}
+                      style={{ 
+                        left: `${wagonLeft}%`, 
+                        width: `${wagonWidth}%`,
+                        minWidth: wagonWidth < 1 ? '20px' : '25px' // Adjust minimum size based on relative width
+                      }}
+                      title={tooltipContent}
+                      onClick={() => onWagonSelect && onWagonSelect(wagon.id)}
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, wagon)}
+                    >
+                      <div className="flex flex-col items-center justify-center h-full w-full px-0.5">
+                        {/* For larger wagons, show type and construction site */}
+                        {wagonWidth > 6 && (
+                          <span className={`text-white text-center leading-tight font-medium ${wagonWidth <= 12 ? 'text-[9px]' : 'text-xs'}`}>
+                            {wagonTypeName}{constructionSiteName ? ` - ${constructionSiteName.substring(0, 6)}${constructionSiteName.length > 6 ? '...' : ''}` : ''}
+                          </span>
+                        )}
+                        
+                        {/* For medium wagons, show simplified info */}
+                        {wagonWidth <= 6 && wagonWidth > 3 && (
+                          <span className="text-white text-center leading-none text-[8px]">
+                            {wagonTypeName ? wagonTypeName.substring(0, 4) : ''}
+                          </span>
+                        )}
+                        
+                        {/* Always show the ID */}
+                        <span className={`text-white text-center font-bold ${
+                          wagonWidth <= 3 ? 'text-[7px] leading-none' : 
+                          wagonWidth <= 6 ? 'text-[8px] leading-none' : 
+                          wagonWidth <= 10 ? 'text-[10px]' : 'text-sm'
+                        }`}>
+                          {displayId}
                         </span>
-                      )}
-                      
-                      {/* For medium wagons, show simplified info */}
-                      {wagonWidth <= 6 && wagonWidth > 3 && (
-                        <span className="text-white text-center leading-none text-[8px]">
-                          {wagonTypeName ? wagonTypeName.substring(0, 4) : ''}
-                        </span>
-                      )}
-                      
-                      {/* Always show the ID */}
-                      <span className={`text-white text-center font-bold ${
-                        wagonWidth <= 3 ? 'text-[7px] leading-none' : 
-                        wagonWidth <= 6 ? 'text-[8px] leading-none' : 
-                        wagonWidth <= 10 ? 'text-[10px]' : 'text-sm'
-                      }`}>
-                        {displayId}
-                      </span>
+                      </div>
                     </div>
-                  </div>
-                );
-              });
-          })()}
+                  );
+                });
+            })()}
+          </div>
         </div>
-      </div>
 
-      {/* Additional information */}
-      <div className="mt-2 flex justify-between text-xs text-gray-500">
-        <div>
-          {wagonCount} Waggon{wagonCount !== 1 ? 's' : ''}
-        </div>
-        <div>
-          {availableLength}m verfügbar
+        {/* Additional information */}
+        <div className="mt-2 flex justify-between text-xs text-gray-500">
+          <div>
+            {wagonCount} Waggon{wagonCount !== 1 ? 's' : ''}
+          </div>
+          <div>
+            {availableLength}m verfügbar
+          </div>
         </div>
       </div>
-    </div>
+      
+      {/* Add the restriction confirmation dialog */}
+      {showRestrictionDialog && restrictionDetails && restrictionDetails.restrictions && restrictionDetails.restrictions.length > 0 && (
+        <Dialog 
+          open={showRestrictionDialog} 
+          onOpenChange={(open) => {
+            if (!open) {
+              cancelRestrictionDialog();
+            }
+          }}
+        >
+          <DialogContent className="max-w-lg z-50">
+            <DialogHeader>
+              <DialogTitle className="text-red-600">Einschränkungen erkannt</DialogTitle>
+            </DialogHeader>
+            
+            <div className="mt-4 space-y-4">
+              <div className="space-y-3">
+                <p className="text-red-600 font-medium">
+                  Achtung! Es gibt aktive Einschränkungen für diese Waggonbewegung.
+                </p>
+                
+                <div className="bg-red-50 border border-red-200 p-4 rounded-md space-y-3 max-h-60 overflow-y-auto">
+                  {restrictionDetails?.restrictions?.map((r: any, index: number) => (
+                    <div key={index} className={index > 0 ? "pt-2 border-t border-red-100" : ""}>
+                      <div className="flex items-start">
+                        <div className="bg-red-100 text-red-700 p-1 rounded-md mr-2">
+                          {r.type === 'no_entry' ? 
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M3 10a7 7 0 1114 0 7 7 0 01-14 0zm7-8a8 8 0 100 16 8 8 0 000-16zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clipRule="evenodd" />
+                            </svg> : 
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                            </svg>
+                          }
+                        </div>
+                        <div>
+                          <p className="font-medium text-red-700">
+                            {r.type === 'no_entry' ? 'Einfahrt verboten' : 'Ausfahrt verboten'}
+                          </p>
+                          {r.comment && (
+                            <p className="text-sm mt-1">
+                              <span className="font-medium">Grund:</span> {r.comment}
+                            </p>
+                          )}
+                          {r.restriction_date && (
+                            <p className="text-xs text-gray-600 mt-1">
+                              <span className="font-medium">Gültig am:</span> {new Date(r.restriction_date).toLocaleDateString()}
+                            </p>
+                          )}
+                          {r.affected_track_id && (
+                            <p className="text-xs text-gray-600">
+                              <span className="font-medium">Betroffenes Gleis:</span> {
+                                (() => {
+                                  const affectedTrack = tracks.find((t) => t.id === r.affected_track_id);
+                                  return affectedTrack ? affectedTrack.name : r.affected_track_id;
+                                })()
+                              }
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  
+                  {!restrictionDetails?.restrictions?.length && (
+                    <p className="text-gray-500 italic">Keine Details verfügbar</p>
+                  )}
+                </div>
+                
+                <div className="bg-amber-50 border border-amber-200 p-3 rounded-md">
+                  <p className="text-sm text-amber-800 font-medium">
+                    Waggonbewegung trotz Einschränkungen zulassen?
+                  </p>
+                  <p className="text-sm text-amber-700 mt-1">
+                    Diese Waggonbewegung kann zu Planungskonflikten führen. Die Fahrt wird als "problematisch" markiert.
+                  </p>
+                </div>
+              </div>
+            </div>
+            
+            <DialogFooter className="gap-2 mt-2 flex flex-col sm:flex-row">
+              <Button
+                onClick={cancelRestrictionDialog}
+                variant="outline"
+                className="flex-1"
+                disabled={isSubmitting}
+              >
+                Abbrechen
+              </Button>
+              <Button
+                onClick={() => {
+                  try {
+                    handleConfirmRestrictedMove();
+                  } catch (error) {
+                    console.error("Error in restriction confirmation:", error);
+                    cancelRestrictionDialog();
+                    toast({
+                      title: "Fehler",
+                      description: "Die Bewegung konnte nicht ausgeführt werden. Bitte versuchen Sie es erneut.",
+                      variant: "destructive"
+                    });
+                  }
+                }}
+                variant="destructive"
+                className="flex-1"
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? (
+                  <span className="flex items-center">
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Verarbeite...
+                  </span>
+                ) : (
+                  "Trotz Einschränkungen verschieben"
+                )}
+              </Button>
+            </DialogFooter>
+            
+            {/* Add emergency close button at top right */}
+            <button 
+              className="absolute top-2 right-2 p-1 rounded-full hover:bg-gray-200"
+              onClick={cancelRestrictionDialog}
+              aria-label="Close dialog"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+              </svg>
+            </button>
+          </DialogContent>
+        </Dialog>
+      )}
+    </>
   );
 };
 

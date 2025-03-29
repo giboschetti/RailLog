@@ -503,6 +503,9 @@ export async function checkTripRestrictionsSimplified(
     const dateString = tripDate.toISOString().split('T')[0]; // YYYY-MM-DD
     const timeString = tripDate.toTimeString().substring(0, 8); // HH:MM:SS
     
+    console.log(`Checking restrictions for ${tripType} trip on ${dateString} at ${timeString}`);
+    console.log(`Source track: ${sourceTrackId || 'none'}, Destination track: ${destTrackId || 'none'}`);
+    
     let restrictions: any[] = [];
     
     // Check for entry restrictions (deliveries and internal trips)
@@ -517,21 +520,32 @@ export async function checkTripRestrictionsSimplified(
       if (entryError) {
         console.error('Error fetching entry restrictions:', entryError);
       } else if (entryRestrictions && entryRestrictions.length > 0) {
+        console.log(`Found ${entryRestrictions.length} potential entry restrictions for track ${destTrackId}`);
+        
         // Filter restrictions by date
         const activeRestrictions = entryRestrictions.filter(r => {
           const restrictionDate = r.restriction_date ? new Date(r.restriction_date) : null;
           
           // Check if the restriction date matches (null means it applies to all dates)
           if (!restrictionDate) {
+            console.log(`Entry restriction ${r.id} applies to all dates`);
             return true; // Applies to all dates
           }
           
           // Compare just the dates (ignore time)
           const restrictionDateStr = restrictionDate.toISOString().split('T')[0];
-          return restrictionDateStr === dateString;
+          const isActive = restrictionDateStr === dateString;
+          
+          if (isActive) {
+            console.log(`Entry restriction ${r.id} is active on ${dateString}`);
+          }
+          
+          return isActive;
         });
         
         if (activeRestrictions.length > 0) {
+          console.log(`Found ${activeRestrictions.length} active entry restrictions for track ${destTrackId}`);
+          
           restrictions = restrictions.concat(activeRestrictions.map(r => ({
             ...r,
             restriction_type: 'no_entry',
@@ -554,21 +568,32 @@ export async function checkTripRestrictionsSimplified(
       if (exitError) {
         console.error('Error fetching exit restrictions:', exitError);
       } else if (exitRestrictions && exitRestrictions.length > 0) {
+        console.log(`Found ${exitRestrictions.length} potential exit restrictions for track ${sourceTrackId}`);
+        
         // Filter restrictions by date
         const activeRestrictions = exitRestrictions.filter(r => {
           const restrictionDate = r.restriction_date ? new Date(r.restriction_date) : null;
           
           // Check if the restriction date matches (null means it applies to all dates)
           if (!restrictionDate) {
+            console.log(`Exit restriction ${r.id} applies to all dates`);
             return true; // Applies to all dates
           }
           
           // Compare just the dates (ignore time)
           const restrictionDateStr = restrictionDate.toISOString().split('T')[0];
-          return restrictionDateStr === dateString;
+          const isActive = restrictionDateStr === dateString;
+          
+          if (isActive) {
+            console.log(`Exit restriction ${r.id} is active on ${dateString}`);
+          }
+          
+          return isActive;
         });
         
         if (activeRestrictions.length > 0) {
+          console.log(`Found ${activeRestrictions.length} active exit restrictions for track ${sourceTrackId}`);
+          
           restrictions = restrictions.concat(activeRestrictions.map(r => ({
             ...r,
             restriction_type: 'no_exit',
@@ -579,10 +604,13 @@ export async function checkTripRestrictionsSimplified(
       }
     }
     
-    return {
+    const result = {
       hasRestrictions: restrictions.length > 0,
       restrictions
     };
+    
+    console.log(`Restriction check result: hasRestrictions=${result.hasRestrictions}, found ${restrictions.length} restrictions`);
+    return result;
   } catch (error) {
     console.error('Error checking trip restrictions:', error);
     return {
@@ -957,12 +985,25 @@ export async function expandRestriction(
       hasSupabase: !!supabaseClient
     });
     
-    // Validate the supabase client is working
+    // Validate the supabase client is working by checking the table
     try {
-      const healthCheck = await supabaseClient.from('daily_restrictions').select('count', { count: 'exact', head: true });
-      console.log('Supabase health check:', healthCheck);
-    } catch (err) {
-      console.error('Supabase health check failed:', err);
+      const { error } = await supabaseClient
+        .from('daily_restrictions')
+        .select('*', { count: 'exact', head: true });
+        
+      if (error) {
+        console.error('Table check failed:', error);
+        return {
+          success: false,
+          error: `Table access error: ${error.message}`
+        };
+      }
+    } catch (err: any) {
+      console.error('Exception during table check:', err);
+      return {
+        success: false,
+        error: `Exception during table check: ${err.message || 'Unknown error'}`
+      };
     }
     
     // Parse dates with explicit UTC handling to avoid timezone issues
