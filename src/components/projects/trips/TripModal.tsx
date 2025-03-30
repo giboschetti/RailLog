@@ -734,6 +734,7 @@ const TripModal: React.FC<TripModalProps> = ({
         // Check for different types of warnings that need confirmation
         const restrictionWarnings = validationResult.warnings?.filter(w => w.type === 'restriction') || [];
         const capacityWarnings = validationResult.warnings?.filter(w => w.type === 'capacity') || [];
+        const futureConflicts = validationResult.warnings?.filter(w => w.type === 'future_capacity_conflict') || [];
         
         if (restrictionWarnings.length > 0) {
           // Restrictions take priority over capacity warnings
@@ -747,6 +748,14 @@ const TripModal: React.FC<TripModalProps> = ({
           // Show capacity warnings if there are no restrictions
           setConfirmDialogTitle('Kapazitätsprobleme erkannt');
           setConfirmDialogAction('capacity');
+          setShowConfirmDialog(true);
+          return false; // Don't proceed until user confirms
+        } else if (futureConflicts.length > 0) {
+          // Show future capacity conflict warnings
+          const conflictMessages = futureConflicts.map(w => w.message).join('\n\n');
+          setConfirmDialogMessage(`Diese Lieferung hat ausreichend Kapazität zum geplanten Zeitpunkt, aber wird Konflikte mit zukünftigen Fahrten verursachen:\n\n${conflictMessages}\n\nMöchten Sie trotzdem fortfahren?`);
+          setConfirmDialogTitle('Zukünftige Kapazitätskonflikte erkannt');
+          setConfirmDialogAction('future_conflicts');
           setShowConfirmDialog(true);
           return false; // Don't proceed until user confirms
         }
@@ -1118,7 +1127,13 @@ const TripModal: React.FC<TripModalProps> = ({
         >
           <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto z-50">
             <DialogHeader>
-              <DialogTitle className={confirmDialogAction === 'restrictions' ? "text-red-600" : "text-amber-600"}>
+              <DialogTitle className={
+                confirmDialogAction === 'restrictions' 
+                  ? "text-red-600" 
+                  : confirmDialogAction === 'future_conflicts'
+                    ? "text-blue-600"
+                    : "text-amber-600"
+              }>
                 {confirmDialogTitle}
               </DialogTitle>
             </DialogHeader>
@@ -1135,6 +1150,18 @@ const TripModal: React.FC<TripModalProps> = ({
                     </div>
                     <p className="text-sm mt-2">
                       Diese Fahrt kann zu Planungskonflikten führen. Möchten Sie trotzdem fortfahren?
+                    </p>
+                  </div>
+                ) : confirmDialogAction === 'future_conflicts' ? (
+                  <div>
+                    <p className="text-blue-600 font-medium mb-2">Hinweis: Diese Lieferung wird zukünftige Kapazitätskonflikte verursachen.</p>
+                    <div className="bg-blue-50 border border-blue-200 p-3 rounded-md text-sm max-h-60 overflow-y-auto">
+                      {confirmDialogMessage.split('\n').map((line, index) => (
+                        <p key={index} className="mb-1 last:mb-0">{line}</p>
+                      ))}
+                    </div>
+                    <p className="text-sm mt-2">
+                      Es gibt ausreichend Kapazität zum geplanten Zeitpunkt, aber zukünftige Fahrten könnten betroffen sein. Möchten Sie trotzdem fortfahren?
                     </p>
                   </div>
                 ) : (
@@ -1189,11 +1216,16 @@ const TripModal: React.FC<TripModalProps> = ({
                       });
                     }
                   }}
-                  variant="destructive"
+                  variant={confirmDialogAction === 'restrictions' ? "destructive" : confirmDialogAction === 'future_conflicts' ? "default" : "secondary"}
                   className="flex-1"
                   type="button"
                 >
-                  {confirmDialogAction === 'restrictions' ? 'Einschränkungen bestätigen' : 'Trotzdem fortfahren'}
+                  {confirmDialogAction === 'restrictions' 
+                    ? 'Einschränkungen bestätigen' 
+                    : confirmDialogAction === 'future_conflicts'
+                      ? 'Konflikt akzeptieren und fortfahren'
+                      : 'Trotzdem fortfahren'
+                  }
                 </Button>
               </div>
             </div>

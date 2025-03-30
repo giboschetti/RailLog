@@ -2,6 +2,17 @@ import { supabase } from './supabase';
 import { checkTrackCapacity, checkTrackCapacityForTrip, checkTripRestrictionsSimplified } from './trackUtils';
 import { TripType, Wagon, WagonGroup } from './supabase';
 
+// Add interface for future conflicts
+interface FutureConflict {
+  trip_id: string;
+  trip_name: string;
+  trip_time: string;
+  trip_type: string;
+  available_length: number;
+  required_length: number;
+  conflict_date: string;
+}
+
 export interface ValidationResult {
   isValid: boolean;
   errors: ValidationError[];
@@ -114,7 +125,7 @@ export async function validateDelivery(deliveryData: DeliveryTripData): Promise<
     };
   }
   
-  // Check track capacity
+  // Check track capacity using our new approach
   if (deliveryData.destTrackId) {
     try {
       // Get track details to check capacity
@@ -125,26 +136,63 @@ export async function validateDelivery(deliveryData: DeliveryTripData): Promise<
         .single();
       
       if (trackData) {
-        // Get current track usage
-        const capacityResult = await checkTrackCapacityForTrip(
-          deliveryData.destTrackId,
-          deliveryData.dateTime,
-          totalWagonLength
-        );
+        // 1. Check capacity at the specific arrival time
+        const { data: occupancyData, error: occupancyError } = await supabase
+          .rpc('get_track_occupancy_at_time', { 
+            track_id_param: deliveryData.destTrackId,
+            time_point: deliveryData.dateTime
+          });
+          
+        if (occupancyError) throw occupancyError;
         
-        if (!capacityResult.hasCapacity) {
-          // Treat capacity issues as errors instead of warnings
+        if (!occupancyData.success) {
+          throw new Error(occupancyData.error || 'Failed to check track occupancy');
+        }
+        
+        const availableLength = occupancyData.available_length || 0;
+        const hasCapacity = trackData.useful_length === 0 || totalWagonLength <= availableLength;
+        
+        // Only add an error if there's no capacity at the specific arrival time
+        if (!hasCapacity) {
           errors.push({
             field: 'destTrackId',
-            message: `Insufficient capacity on track "${trackData.name}". Available: ${capacityResult.availableLength || 0}m, Required: ${totalWagonLength}m.`,
+            message: `Insufficient capacity on track "${trackData.name}". Available: ${availableLength}m, Required: ${totalWagonLength}m.`,
             details: {
               trackId: deliveryData.destTrackId,
               trackName: trackData.name,
-              availableLength: capacityResult.availableLength || 0,
+              availableLength,
               requiredLength: totalWagonLength,
-              overCapacityBy: totalWagonLength - (capacityResult.availableLength || 0)
+              overCapacityBy: totalWagonLength - availableLength
             }
           });
+        } else {
+          // 2. If it has capacity at the arrival time, check for future conflicts
+          const { data: conflicts, error: conflictsError } = await supabase
+            .rpc('check_delivery_future_conflicts', {
+              track_id_param: deliveryData.destTrackId,
+              time_point: deliveryData.dateTime,
+              wagon_length: totalWagonLength
+            });
+            
+          if (conflictsError) {
+            console.error('Error checking future conflicts:', conflictsError);
+          } else if (conflicts && conflicts.length > 0) {
+            // Add future conflicts as warnings instead of blocking errors
+            conflicts.forEach((conflict: FutureConflict) => {
+              warnings.push({
+                type: 'future_capacity_conflict',
+                message: `Capacity conflict: This delivery will create a capacity issue for a future trip on ${conflict.conflict_date}. Available: ${conflict.available_length}m, Required: ${conflict.required_length}m.`,
+                details: {
+                  conflictTripId: conflict.trip_id,
+                  conflictTripName: conflict.trip_name,
+                  conflictTime: conflict.trip_time,
+                  conflictType: conflict.trip_type,
+                  availableLength: conflict.available_length,
+                  requiredLength: conflict.required_length
+                }
+              });
+            });
+          }
         }
       }
     } catch (error: any) {
